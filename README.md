@@ -1,6 +1,6 @@
 # FioTransfer
 
-Fast uploads to and downloads from Frame.io, for macOS.
+Fast uploads to and downloads from Frame.io, for macOS, Linux and Windows.
 
 ![FioTransfer](docs/screenshot.png)
 
@@ -18,3 +18,10 @@ FioTransfer is a desktop app that replaces Frame.io's Transfer app. It moves fil
 - **Keeps running in the menu bar:** close the window and transfers carry on. "Download from Link…" in the menu bar menu opens a small window for a link and where to save it, with the copied link already filled in. It can also start at login.
 - **Updates itself:** it tells you when a new version is out and installs it with one click.
 - **Works from the command line:** the `fio` tool does downloads and uploads from scripts.
+
+## The Rust build
+
+This is the Rust rewrite: the same app, the same engine, no webview. `fiotransfer-core` holds the engine (`core/`),
+`egui-ui` draws the screens and runs it, `sys/` is the only crate allowed to be `unsafe`, and the root package is the
+`fio` command line plus the bench harness. Notes for working on it — the layout, the test suites, the packaging and the
+updater — are in [docs/RUST-PORT.md](docs/RUST-PORT.md).

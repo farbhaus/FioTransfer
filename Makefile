@@ -1,25 +1,27 @@
 # Build FioTransfer.app into the project folder (signed ad-hoc so macOS opens it).
+# The app is the egui front end (`egui-ui`) on the real engine (`core/`); the
+# root package is only the CLI and the bench.
+# The same targets the Go Makefile has: app, cli, test, clean.
+
 APP := FioTransfer.app
 
-.PHONY: app dmg cli test clean
-app:
-	~/go/bin/wails build -platform darwin/arm64 -clean -trimpath
-	rm -rf $(APP)
-	cp -R build/bin/$(APP) $(APP)
-	cp LICENSE $(APP)/Contents/Resources/LICENSE.txt
-	cp THIRD_PARTY_NOTICES.txt $(APP)/Contents/Resources/
-	codesign --force --deep -s - $(APP)
-	@echo "Built ./$(APP)"
+.PHONY: app bundle cli bench test clean
 
-# Universal .dmg + .zip in dist/ (same script CI uses). VERSION=1.2.3 make dmg
-dmg:
-	scripts/package.sh $(or $(VERSION),dev)
+app: bundle
+
+bundle:
+	scripts/bundle.sh
 
 cli:
-	go build -o bin/fio ./cmd/fio
+	cargo build --release --bin fio
+	mkdir -p bin && cp target/release/fio bin/fio
+
+bench:
+	cargo build --release --bin fio-bench
+	mkdir -p bin && cp target/release/fio-bench bin/fio-bench
 
 test:
-	go test -race ./internal/...
+	cargo test --workspace
 
 clean:
-	rm -rf $(APP) build/bin bin dist
+	rm -rf $(APP) target bin

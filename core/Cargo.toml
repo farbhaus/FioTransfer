@@ -1,0 +1,56 @@
+[package]
+name = "fiotransfer-core"
+version = "1.6.1"
+edition = "2021"
+description = "FioTransfer's logic: the Frame.io API, the transfer engine, watch folders, history and the app — no window, no webview"
+
+[lib]
+name = "fiotransfer_core"
+path = "src/lib.rs"
+
+# Nothing here draws anything. The window lives in `egui-ui` (the app) and the
+# CLI in the root package; both drive the `App` this crate builds. What a host
+# must supply — panels, the clipboard, notifications, window show, quit — is
+# `host::Host`, and a host that implements nothing still runs.
+[dependencies]
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+futures = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+reqwest = { version = "0.13.5", default-features = true, features = ["json", "stream", "cookies"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+rand = "0.10.3"
+sha2 = "0.11.1"
+base64 = "0.23.1"
+url = "2.5.8"
+percent-encoding = "2.3.2"
+rcgen = { version = "0.14.10", features = ["pem", "x509-parser"] }
+rustls = "0.23.46"
+rustls-pemfile = "2.2.0"
+tokio-rustls = "0.26.6"
+# The C boundary: `platform` is libc and `std` only — no Objective-C shim — so
+# this links into any binary that call it, on any of the three platforms.
+fiotransfer-sys = { path = "../sys" }
+async-trait = "0.1.92"
+once_cell = "1"
+x509-parser = "0.18.1"
+time = { version = "0.3.55", features = ["formatting", "parsing"] }
+bytes = "1.12.1"
+cargo-packager-updater = "0.2.3"
+
+# The Keychain exists only on macOS; `secret.rs` falls back to its 0600 file
+# elsewhere, which is what the Linux and Windows builds of the app do.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7.0"
+
+[dev-dependencies]
+# The unit tests in the modules that moved here carry their own property tests.
+proptest = "1.12.0"
+# `login.rs` names an errno; everything else that touches libc goes through
+# `fiotransfer-sys`.
+libc = "0.2"
+tempfile = "3.27.0"
+# The updater key check: verify a fixture signed by the release key, so a typo in
+# PUB_KEY cannot ship (it shipped once, in 1.5.0 and 1.5.1).
+minisign-verify = "0.2"

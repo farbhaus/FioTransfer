@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- The canvas is the whole page: no margins, no scrollbars, nothing else to
+         capture. `bench/wasm-shots.sh` screenshots this at 1180x780. -->
+    <title>FioTransfer — egui (wasm capture)</title>
+    <!-- No favicon request: a 404 in the console is noise when the console is
+         how a broken capture gets diagnosed. -->
+    <link rel="icon" href="data:," />
+    <link data-trunk rel="rust" href="../Cargo.toml" data-wasm-opt="0" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 1180px;
+        height: 780px;
+        overflow: hidden;
+        /* --base, so the frame between load and the first paint is the window's
+           own colour and not Chromium's white. */
+        background: #000;
+      }
+      #fio-canvas {
+        display: block;
+        width: 1180px;
+        height: 780px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="fio-canvas"></canvas>
+  </body>
+</html>

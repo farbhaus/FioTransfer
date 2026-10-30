@@ -1,0 +1,18 @@
+# Trunk's configuration for the wasm capture build (see `src/wasm.rs` and
+# `bench/wasm-shots.sh`). The page lives in `web/`, the crate in the parent
+# directory, so both paths are pointed at explicitly.
+[build]
+target = "web/index.html"
+dist = "web/dist"
+# `[[bin]]` needs the `native` feature, so dropping the package's default
+# features leaves `cargo build --target wasm32-unknown-unknown` building the
+# cdylib and nothing else. eframe's own features are untouched.
+no_default_features = true
+# No subresource-integrity hashes: they only earn a Chromium warning on
+# modulepreload, and this build is local.
+no_sri = true
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8137
+open = false
