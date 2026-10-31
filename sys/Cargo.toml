@@ -1,0 +1,23 @@
+[package]
+name = "fiotransfer-sys"
+version = "0.1.0"
+edition = "2021"
+description = "The C boundary of FioTransfer: the libc calls the engine needs, behind safe functions"
+
+[lib]
+name = "fiotransfer_sys"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+
+# On Windows the C boundary is kernel32, not libc: `file_id` asks
+# `GetFileInformationByHandle` for the pair that means "the same file" there. The
+# bindings are the generated SDK ones (already in this workspace's tree through
+# `winit`), not a hand-copied struct.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+proptest = "1.12.0"
+tempfile = "3.27.0"
