@@ -20,7 +20,7 @@ the GitHub API for the newest release. Nothing here depends on that half.
 
 ## The endpoint
 
-    https://github.com/chaos-dotcom/FioTransfer/releases/latest/download/latest.json
+    https://github.com/farbhaus/FioTransfer/releases/latest/download/latest.json
 
 Nothing is hosted for this. `/releases/latest/download/<name>` is a redirect to
 the `<name>` asset of the newest published release, so the URL is stable and its
@@ -32,16 +32,17 @@ knowing:
 * the URL is a redirect to the exact tag's file (`.../download/v1.5.0/latest.json`),
   so a client that caches it will keep seeing an old version.
 
-A pull request builds the packages but publishes nothing, and a push to main only
-releases when `[package] version` in `Cargo.toml` names a tag that does not exist
-yet — unchanged behaviour, see `.github/workflows/packager.yml`.
+A pull request or a push to main builds the packages but publishes nothing. A
+`v*` tag publishes the release, and the tag must match `[package] version` in
+`Cargo.toml` (`.github/workflows/build.yml`).
 
 ## What a release carries
 
 | asset | what it is | in the feed |
 | --- | --- | --- |
-| `FioTransfer-<v>-macos-app.zip` | the `.app`, ad-hoc signed, zipped | yes, `macos-<arch>` (default) |
-| `FioTransfer-<v>-macos-app.tar.gz` | the same `.app` as a gzip'd tar | `--macos-artifact tar.gz` only |
+| `FioTransfer-<v>-macOS.zip` | the universal `.app`, zipped | yes, `macos-aarch64` and `macos-x86_64` |
+| `FioTransfer-<v>.dmg` | the same `.app` in a disk image | no |
+| `SHA256SUMS.txt` | every asset's SHA-256 | no — the Go app's updater (v1.3.0 and older) reads it |
 | `FioTransfer-<v>-linux.deb` | Debian package | no — the updater installs the AppImage |
 | `FioTransfer-<v>-linux.AppImage` | AppImage | yes, `linux-x86_64` |
 | `FioTransfer-<v>-windows-setup.exe` | NSIS installer | yes, `windows-x86_64` |
@@ -51,15 +52,12 @@ yet — unchanged behaviour, see `.github/workflows/packager.yml`.
 The `.deb` is signed like everything else so a human can check it, but no feed
 entry points at it: `cargo-packager-updater` installs an AppImage on Linux.
 
-Two macOS artifacts exist because the two readers want different things. A
-person downloading the app wants a zip. `cargo-packager-updater`'s own macOS
-installer does not: it feeds the downloaded bytes to a `GzDecoder` wrapped in a
-`tar::Archive` and fails on a zip with `invalid gzip header`. Its tar also drops
-the archive's first path component before renaming what is left over the old
-bundle, so `FioTransfer-<v>-macos-app.tar.gz` holds exactly one top-level entry,
-`FioTransfer.app`. The feed points at the **zip** by default; one flag in the
-release job (`--macos-artifact tar.gz`) points it at the tarball instead, for a
-client that uses the crate's own installer rather than its own.
+The macOS zip keeps the Go releases' name, so three readers find the same file:
+a person downloading the app, `scripts/install.sh`, and the Go app's updater,
+which looks for `-macOS.zip` and its line in `SHA256SUMS.txt`. The app's own
+installer (`core/src/update.rs`) verifies the zip's signature, unpacks it with
+`ditto` and checks the bundle; `cargo-packager-updater`'s own macOS installer,
+which wants a .tar.gz, isn't used.
 
 ## The JSON, exactly
 
@@ -76,22 +74,22 @@ client that uses the crate's own installer rather than its own.
   "platforms": {
     "linux-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNhcmdvLXBhY2thZ2Vy…",
-      "url": "https://github.com/chaos-dotcom/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-linux.AppImage",
+      "url": "https://github.com/farbhaus/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-linux.AppImage",
       "format": "appimage"
     },
     "macos-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNhcmdvLXBhY2thZ2Vy…",
-      "url": "https://github.com/chaos-dotcom/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-macos-app.zip",
+      "url": "https://github.com/farbhaus/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-macOS.zip",
       "format": "app"
     },
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNhcmdvLXBhY2thZ2Vy…",
-      "url": "https://github.com/chaos-dotcom/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-macos-app.zip",
+      "url": "https://github.com/farbhaus/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-macOS.zip",
       "format": "app"
     },
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNhcmdvLXBhY2thZ2Vy…",
-      "url": "https://github.com/chaos-dotcom/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-windows-setup.exe",
+      "url": "https://github.com/farbhaus/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-windows-setup.exe",
       "format": "nsis"
     }
   }
@@ -147,17 +145,17 @@ That writes two files and refuses to overwrite an existing one without
 The current public key (this is safe to publish; it only *verifies*):
 
 ```
-dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZGRTZEQ0E0Q0Q1NjM5MjUKUldRbE9WYk5wTnptYjhlZ1pEck52Y3VvaHY1M0drUE1tUDhXT2dyUHdyUWNNbDBXdFZCY3N4bmoK
+dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE2OUNCNTk4ODI5ODcxMUQKUldRZGNaaUNtTFdjcGpJd1dua1k0cDNTS3ZmdGErSGlrcTZEOWFGKzM2eWtPUDQ4RS9GVmhHdUUK
 ```
 
 and what is inside it, since a minisign key is itself base64 text:
 
 ```
-untrusted comment: minisign public key: 6FE6DCA4CD563925
-RWQlOVbNpNzmb8egZDrNvcuohv53GkPMmP8WOgrPwrQcMl0WtVBcsxnj
+untrusted comment: minisign public key: A69CB5988298711D
+RWQdcZiCmLWcpjIwWnkY4p3SKvfta+Hikq6D9aF+36ykOP48E/FVhGuE
 ```
 
-`6FE6DCA4CD563925` is the key id: it is printed next to every signature, and a
+`A69CB5988298711D` is the key id: it is printed next to every signature, and a
 signature made by a different key fails verification even when both keys belong
 to this project.
 
@@ -249,7 +247,7 @@ change. There is no way to rotate a signing key faster than you can ship code.
 ## Checking a feed by hand
 
 ```sh
-curl -sSL https://github.com/chaos-dotcom/FioTransfer/releases/latest/download/latest.json \
+curl -sSL https://github.com/farbhaus/FioTransfer/releases/latest/download/latest.json \
   | python3 -m json.tool
 ```
 
@@ -276,12 +274,12 @@ one is wrong.
 printf '%s' '<the base64 above>' | base64 -d > /tmp/updater.pub
 
 # 2. a downloaded signature, unwrapped the same way
-curl -sSLO https://github.com/chaos-dotcom/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-macos-app.zip
-curl -sSLO https://github.com/chaos-dotcom/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-macos-app.zip.sig
-base64 -d < FioTransfer-1.5.0-macos-app.zip.sig > /tmp/fio.minisig
+curl -sSLO https://github.com/farbhaus/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-macOS.zip
+curl -sSLO https://github.com/farbhaus/FioTransfer/releases/download/v1.5.0/FioTransfer-1.5.0-macOS.zip.sig
+base64 -d < FioTransfer-1.5.0-macOS.zip.sig > /tmp/fio.minisig
 
 # 3. verify (brew install minisign)
-minisign -Vm FioTransfer-1.5.0-macos-app.zip -x /tmp/fio.minisig -p /tmp/updater.pub
+minisign -Vm FioTransfer-1.5.0-macOS.zip -x /tmp/fio.minisig -p /tmp/updater.pub
 ```
 
 `minisign` answers with its exit status: it reports the signature and the comment
@@ -300,7 +298,7 @@ release, which is a cheap way to see whether the workflow is still producing wha
 the script expects:
 
 ```sh
-gh release download v1.5.0 --repo chaos-dotcom/FioTransfer --dir /tmp/rel
+gh release download v1.5.0 --repo farbhaus/FioTransfer --dir /tmp/rel
 python3 scripts/latest-json.py --dir /tmp/rel --version 1.5.0 \
   --target macos-aarch64 --target linux-x86_64 --target windows-x86_64 \
   --out /tmp/latest.json

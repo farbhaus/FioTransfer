@@ -28,8 +28,9 @@ for its own `target()`, and the parser ignores keys it was not asked for.
 
 Which key applies to which asset is recorded by the CI job that built the
 artifact, not guessed here: every packaging job writes `updater-target-<os>.txt`
-holding its key (for example `macos-aarch64`), because the architecture is a
-property of the runner that produced the bytes.
+holding its keys, one per line (for example `macos-aarch64` and `macos-x86_64`
+for the universal macOS app), because the architectures are a property of the
+build that produced the bytes.
 """
 
 from __future__ import annotations
@@ -43,13 +44,11 @@ import sys
 from pathlib import Path
 
 # The release names its assets `FioTransfer-<version>-<suffix>`, see
-# .github/workflows/packager.yml. The macOS bundle exists in two shapes:
-# a zip, which a "download the app" reader expects, and a .tar.gz, which is what
-# cargo-packager-updater's own macOS installer can unpack (it feeds the bytes to
-# a GzDecoder + tar::Archive and rejects a zip with "invalid gzip header").
-# `--macos-artifact` picks which one the feed points at.
+# .github/workflows/build.yml. The macOS zip keeps the name the Go releases
+# used: the Go app's updater (v1.3.0 and older) and scripts/install.sh find it
+# by that suffix, and the app's own installer unpacks it with ditto.
 SUFFIXES: dict[str, list[str]] = {
-    "macos": ["-macos-app.tar.gz", "-macos-app.zip"],
+    "macos": ["-macOS.zip"],
     "linux": ["-linux.AppImage"],
     "windows": ["-windows-setup.exe"],
 }
@@ -68,16 +67,11 @@ def warn(msg: str) -> None:
     print(f"latest-json: warning: {msg}", file=sys.stderr)
 
 
-def find_assets(directory: Path, version: str, preferred: dict[str, str]) -> dict[str, Path]:
+def find_assets(directory: Path, version: str) -> dict[str, Path]:
     """Map platform -> the one asset of that platform, by its versioned name."""
     found: dict[str, Path] = {}
     for platform, suffixes in SUFFIXES.items():
-        order = list(suffixes)
-        chosen = preferred.get(platform)
-        if chosen and chosen in order:
-            order.remove(chosen)
-            order.insert(0, chosen)
-        for suffix in order:
+        for suffix in suffixes:
             candidate = directory / f"FioTransfer-{version}{suffix}"
             if candidate.is_file():
                 found[platform] = candidate
@@ -100,9 +94,7 @@ def read_target_keys(directory: Path, extra: list[str]) -> list[str]:
     """The `<os>-<arch>` keys this release can serve, as recorded by the jobs."""
     keys: list[str] = []
     for path in sorted(directory.glob("updater-target-*.txt")):
-        key = path.read_text(encoding="utf-8").strip()
-        if key:
-            keys.append(key)
+        keys.extend(k.strip() for k in path.read_text(encoding="utf-8").splitlines() if k.strip())
     keys.extend(extra)
     seen: list[str] = []
     for key in keys:
@@ -140,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--version", required=True, help="release version, e.g. 1.5.0")
     ap.add_argument(
         "--repo",
-        default=os.environ.get("GITHUB_REPOSITORY", "chaos-dotcom/FioTransfer"),
+        default=os.environ.get("GITHUB_REPOSITORY", "farbhaus/FioTransfer"),
         help="owner/name whose release carries the assets",
     )
     ap.add_argument("--tag", default=None, help="release tag (default: v<version>)")
@@ -148,13 +140,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--notes-file", default=None, help="a file holding the release body")
     ap.add_argument("--pub-date", default=None, help="RFC 3339 timestamp (default: now, UTC)")
     ap.add_argument("--out", default=None, help="where to write the JSON (default: <dir>/latest.json)")
-    ap.add_argument(
-        "--macos-artifact",
-        choices=("zip", "tar.gz"),
-        default="zip",
-        help="which macOS asset the feed points at (default: zip, the app archive a "
-        "reader downloads; tar.gz is what cargo-packager-updater's macOS installer unpacks)",
-    )
     ap.add_argument(
         "--target",
         action="append",
@@ -178,8 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     if notes is None or not notes.strip():
         notes = one_line(f"FioTransfer {version}")
 
-    preferred = {"macos": f"-macos-app.{args.macos_artifact}"}
-    assets = find_assets(directory, version, preferred)
+    assets = find_assets(directory, version)
     if not assets:
         die(f"{directory} holds no FioTransfer-{version}-* asset")
 

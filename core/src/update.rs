@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 /// Where the newest release's feed lives: a release asset, so it always
 /// describes the newest release that has finished uploading.
 pub const ENDPOINT: &str =
-    "https://github.com/chaos-dotcom/FioTransfer/releases/latest/download/latest.json";
+    "https://github.com/farbhaus/FioTransfer/releases/latest/download/latest.json";
 
 /// The public half of the key the release workflow signs update assets with.
 ///
@@ -38,7 +38,7 @@ pub const ENDPOINT: &str =
 /// replaced by hand (download and drag across). If it ever has to change, ship a
 /// release signed with the old key first, then start signing with the new one.
 /// Treat this value as write-once.
-pub const PUB_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZGRTZEQ0E0Q0Q1NjM5MjUKUldRbE9WYk5wTnptYjhlZ1pEck52Y3VvaHY1M0drUE1tUDhXT2dyUHdyUWNNbDBXdFZCY3N4bmoK";
+pub const PUB_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE2OUNCNTk4ODI5ODcxMUQKUldRZGNaaUNtTFdjcGpJd1dua1k0cDNTS3ZmdGErSGlrcTZEOWFGKzM2eWtPUDQ4RS9GVmhHdUUK";
 
 /// The app's bundle identifier; an update must have the same one.
 pub const BUNDLE_ID: &str = "com.farbhaus.fiotransfer";
