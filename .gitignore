@@ -12,3 +12,12 @@ dist-egui/
 # committed. The public half is safe to publish and is in docs/UPDATES.md.
 updater.key
 updater-*.key
+
+# release packages (scripts/package.sh)
+/dist/
+
+# macOS
+.DS_Store
+
+# Local notes for AI-assisted development
+/CLAUDE.md
