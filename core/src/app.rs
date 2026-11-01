@@ -1218,6 +1218,24 @@ impl App {
         Ok(self.portal_status())
     }
 
+    /// Stores the names a synced link's folders get when Portal doesn't name
+    /// them (IN and OUT by default). Each is one path segment, and they differ.
+    pub fn set_portal_folders(&self, download: &str, upload: &str) -> Result<portal::agent::PortalStatus, String> {
+        let (download, upload) = (download.trim().to_string(), upload.trim().to_string());
+        portal::agent::check_local(&download)?;
+        portal::agent::check_local(&upload)?;
+        if download == upload {
+            return Err("the IN and OUT folders need different names".to_string());
+        }
+        let saved = config::update(|s| {
+            s.portal_in_folder = download.clone();
+            s.portal_out_folder = upload.clone();
+        })
+        .map_err(|e| e.to_string())?;
+        *self.settings.lock().unwrap() = saved;
+        Ok(self.portal_status())
+    }
+
     /// Forgets the stored bearer token, and the cached "a token is stored" flag
     /// with it, so the Settings screen's status line says so at once instead of
     /// after the next reconcile.

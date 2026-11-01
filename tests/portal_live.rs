@@ -172,14 +172,13 @@ fn live_portal_reconciles_into_watch_folders() {
 }
 
 /// A live Portal is the only place the real `folder` object is, and that object is
-/// what decides whether a link is one mirrored watch or two one-way folders. So:
-/// read the same rows the app reads, and check the watch list against each link's
-/// own mapping — `mirror` at `root/<marker>` when the link carries no `sync`, a
-/// `download` watch at `root/<marker>/<drive.local>` and an `upload` watch at
-/// `root/<marker>/<exports.local>` when it does.
+/// what decides whether a link is synced and how. So: read the same rows the app
+/// reads, and check the watch list against each link — a `download` watch at
+/// `root/<project>/<IN>` for a synced link, an `upload` watch at
+/// `root/<project>/<OUT>` when it names an upload folder, and `mirror` at
+/// `root/<turbosort>` for an older Portal's link with no `sync`.
 ///
-/// Written for both shapes, so it is true of a Portal that seeds a `sync` link
-/// and of one that does not yet.
+/// Written for every shape, so it is true of any Portal.
 #[test]
 fn live_portal_watches_match_each_links_own_mapping() {
     let _serial = one_at_a_time();
@@ -202,42 +201,42 @@ fn live_portal_watches_match_each_links_own_mapping() {
     let by_origin: std::collections::BTreeMap<String, _> =
         rows.iter().filter(|r| r.origin.starts_with("portal:")).map(|r| (r.origin.clone(), r)).collect();
 
+    let names = portal::agent::Names::of(&w.app.settings());
+    let or = |local: &str, default: &str| {
+        let local = local.trim();
+        if local.is_empty() { default.to_string() } else { local.to_string() }
+    };
     for l in &links {
-        let marker = l.marker();
-        if marker.is_empty() || l.is_disabled() || l.acct().is_empty() {
+        if (l.folder.sync.is_none() && l.marker().is_empty()) || l.is_disabled() || l.acct().is_empty() {
             continue; // Portal is not asking for a watch for this one
         }
+        let project = portal::agent::project_folder(l);
         match l.folder.sync.as_ref() {
             None => {
                 let origin = format!("portal:{}", l.id);
-                let row = by_origin.get(&origin).unwrap_or_else(|| panic!("no watch for {} ({})", l.id, marker));
-                assert_eq!(row.local_path, format!("{}/{}", root, marker), "a link with no sync is one mirror");
+                let row = by_origin.get(&origin).unwrap_or_else(|| panic!("no watch for {} ({})", l.id, project));
+                assert_eq!(row.local_path, format!("{}/{}", root, project), "a link with no sync is one mirror");
                 assert_eq!(row.direction, "mirror");
             }
             Some(sync) => {
-                println!("link {} is two one-way folders: {:?}", l.id, sync);
-                if let Some(d) = sync.drive.as_ref() {
-                    let local = format!("{}/{}/{}", root, marker, d.local);
-                    let row = by_origin
-                        .get(&format!("portal:{}", l.id))
-                        .unwrap_or_else(|| panic!("no drive watch for {} at {}", l.id, local));
-                    assert_eq!(row.local_path, local, "the drive folder, under the marker");
-                    assert_eq!(row.direction, "download", "the client's folder only comes down");
-                    let want = if d.folder_id.is_empty() { l.dest_folder() } else { d.folder_id.clone() };
-                    assert_eq!(row.folder_id, want, "drive.folder_id, or the link's own folder");
-                }
-                if let Some(x) = sync.exports.as_ref() {
-                    let local = format!("{}/{}/{}", root, marker, x.local);
+                println!("link {} is synced: {:?}", l.id, sync);
+                let d = sync.download.clone().unwrap_or_default();
+                let local = format!("{}/{}/{}", root, project, or(&d.local, &names.download));
+                let row = by_origin
+                    .get(&format!("portal:{}", l.id))
+                    .unwrap_or_else(|| panic!("no download watch for {} at {}", l.id, local));
+                assert_eq!(row.local_path, local, "the IN folder, under the project");
+                assert_eq!(row.direction, "download", "the client's folder only comes down");
+                let want = if d.folder_id.is_empty() { l.dest_folder() } else { d.folder_id.clone() };
+                assert_eq!(row.folder_id, want, "download.folder_id, or the link's own folder");
+                if let Some(x) = sync.upload.as_ref() {
+                    let local = format!("{}/{}/{}", root, project, or(&x.local, &names.upload));
                     let row = by_origin
                         .get(&format!("portal:{}#exports", l.id))
-                        .unwrap_or_else(|| panic!("no exports watch for {} at {}", l.id, local));
-                    assert_eq!(row.local_path, local, "the exports folder, under the marker");
-                    assert_eq!(row.direction, "upload", "what we make only goes up");
+                        .unwrap_or_else(|| panic!("no upload watch for {} at {}", l.id, local));
+                    assert_eq!(row.local_path, local, "the OUT folder, under the project");
+                    assert_eq!(row.direction, "upload", "what goes back only goes up");
                     assert_eq!(row.folder_id, x.folder_id);
-                    assert_ne!(
-                        row.direction, "mirror",
-                        "no mapping may ever be widened to a mirror: that is what would copy a deletion over"
-                    );
                 }
             }
         }

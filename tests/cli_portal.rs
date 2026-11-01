@@ -301,9 +301,9 @@ impl Home {
         std::fs::read_to_string(self.data().join("settings.json")).unwrap_or_default()
     }
 
-    /// The folder Portal's project folders are mirrored under.
+    /// The folder Portal's project folders go under: the default, `~/Portal`.
     fn root(&self) -> PathBuf {
-        self.dir.join("Live_Work")
+        self.dir.join("Portal")
     }
 
     /// Every file under the home, as text: what the app wrote, wherever it wrote
@@ -355,8 +355,10 @@ impl Home {
     }
 
     /// The one watch Portal's good marker asks for, as `path <- account/folder`.
+    /// The stub's one link carries only a `turbosort`: an older Portal's
+    /// two-way folder.
     fn watch_line(&self) -> String {
-        format!("  {} ← acct-1/folder-1", self.root().join("Farbhaus").display())
+        format!("  {} ↔ acct-1/folder-1", self.root().join("Farbhaus").display())
     }
 }
 

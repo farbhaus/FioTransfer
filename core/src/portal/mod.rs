@@ -1,21 +1,19 @@
-//! Portal: the service that publishes a project's upload and download links,
-//! and the `.turbosort` marker that names its `Live_Work` folder.
+//! Portal: the service that publishes a project's upload and download links.
 //!
-//! FioTransfer talks to Portal for one reason: to learn which project folders
-//! exist and which Frame.io folder each one publishes into, so that
-//! [`agent::reconcile`] can keep a mirrored watch folder for every one of them.
+//! FioTransfer talks to Portal for one reason: to learn which links are ticked
+//! "Sync to FioTransfer" and which Frame.io folders they use, so that
+//! [`agent::reconcile`] can keep a project folder on disk for each of them.
 //! No file passes through Portal. Transfers still go to and from Frame.io; the
 //! local side is ours (`Settings::portal_root`), and Portal's own destination
 //! paths are never adopted.
 //!
 //! Only two endpoints are used, both documented here and neither invented:
 //! `GET /api/upload-links` (the links, each with its `target_folder_id`,
-//! `target_folder_name`, `folder` and `turbosort`) and `GET /api/sync-rules`
-//! (read-only reference: what Portal's own worker would do).
+//! `target_folder_name` and `folder`) and `GET /api/sync-rules` (read-only
+//! reference: what Portal's own worker would do).
 //!
-//! A link's `folder` may also carry a `sync` object — see [`Sync`] — which says
-//! the project is not one mirror but two one-way folders: one the client sends
-//! into, one we make things in. It rides on the same row, so no endpoint is
+//! A synced link's `folder` carries a `sync` object — see [`Sync`] — naming its
+//! one or two one-way folders. It rides on the same row, so no endpoint is
 //! added for it.
 //!
 //! Two credentials open them, and the caller never has to choose:
@@ -497,16 +495,16 @@ fn text_at(v: &Value, key: &str) -> String {
 /// than a `name` key. Both spellings are read, because getting this wrong is not
 /// a parse error — it is a link that is silently skipped for having no folder.
 ///
-/// It may also carry `sync` (see [`Sync`]), which turns the link's one mirror
-/// into two one-way folders. Absent, the link is exactly what it was.
+/// It may also carry `sync` (see [`Sync`]): the link is ticked "Sync to
+/// FioTransfer".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Folder {
     pub id: String,
     pub name: String,
     pub account_id: String,
-    /// The link's two one-way folders, when Portal says the link is not one
-    /// mirror. `None` — the normal case, and the only one an older Portal sends
-    /// — is the single mirrored watch this module has always made.
+    /// Present when the link is synced to FioTransfer: its one or two one-way
+    /// folders. `None` is a link FioTransfer leaves alone (unless it carries
+    /// an older Portal's `turbosort`, which is one mirrored folder).
     pub sync: Option<Sync>,
 }
 
@@ -514,41 +512,46 @@ pub struct Folder {
 /// folder it belongs to.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SyncFolder {
-    /// One path segment, under `<portal root>/<turbosort>`. The same rule the
-    /// marker follows: no `/`, `\`, `%`, control characters, `.` or `..`.
+    /// One path segment under the project's folder, or empty for the user's
+    /// default (`Settings::portal_in_folder` / `portal_out_folder`). The same
+    /// rule as a project folder: no `/`, `\`, `%`, control characters, `.` or `..`.
     pub local: String,
-    /// The Frame.io folder. Empty when Portal named none: for the drive side
-    /// that means the link's own folder, and for the exports side there is
+    /// The Frame.io folder. Empty when Portal named none: for the download side
+    /// that means the link's own folder, and for the upload side there is
     /// nothing to default to.
     pub folder_id: String,
 }
 
-/// The `sync` object Portal may add **inside a link's existing `folder`**, which
-/// `GET /api/upload-links` already returns verbatim:
+/// The `sync` object Portal adds **inside a link's `folder`** when the link is
+/// ticked "Sync to FioTransfer". Its presence is the opt-in; every field in it
+/// is optional:
 ///
 /// ```json
 /// "folder": {
 ///   "type": "frameio", "account_id": "…", "folder_id": "…", "path": […],
-///   "turbosort": "20261028_YML-XMAS-Luc",
 ///   "sync": {
-///     "mode": "add_only",
-///     "drive":   {"local": "1_DRIVE",   "folder_id": "…"},
-///     "exports": {"local": "0_EXPORTS", "folder_id": "…"}
+///     "name": "Acme Spot 30s",
+///     "download": {"local": "IN"},
+///     "upload":   {"local": "OUT", "folder_id": "…"}
 ///   }
 /// }
 /// ```
 ///
-/// `add_only` is the mode this build implements, and the only one: two one-way
-/// folders, and nothing is ever deleted at either end. `drive` is the folder the
-/// client sends into (Frame.io → local); `exports` is the one we make things in
-/// (local → Frame.io) and may be absent. An unstated or unknown mode is read as
-/// `add_only`, and the reconciler notes it instead of refusing the link: a link
-/// that watches nothing is worse than one that watches what the contract says.
+/// `name` is the project's folder on disk (default: the link's name).
+/// `download` is where the client's files come down (default: the link's own
+/// folder, into the user's IN folder); `upload` is a folder whose files go back
+/// up, only when Portal names its Frame.io folder. `"sync": {}` is a link
+/// synced with the defaults. Nothing is deleted at either end.
+///
+/// Older Portals call the sides `drive` and `exports`; both are still read. An
+/// unknown `mode` is read as `add_only`, the only one there is, and noted.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Sync {
     pub mode: String,
-    pub drive: Option<SyncFolder>,
-    pub exports: Option<SyncFolder>,
+    /// The project folder's name, when Portal sets one.
+    pub name: String,
+    pub download: Option<SyncFolder>,
+    pub upload: Option<SyncFolder>,
 }
 
 /// The one mode this build knows: two one-way folders, no deletions propagated.
@@ -571,16 +574,21 @@ impl Sync {
 
 /// The `sync` object of a `folder`, when there is a usable one.
 ///
-/// A `sync` that is present but not an object is read as absent, and the link
-/// then keeps the single mirrored watch it has today. Guessing here would be the
-/// one wrong guess that turns a one-way folder into a mirror; leaving it alone
-/// means a malformed row changes nothing.
+/// A `sync` that is present but not an object is read as absent: the link is
+/// not synced. Guessing here could turn a one-way folder into something else;
+/// leaving it alone means a malformed row changes nothing.
 fn sync_at(v: &Value) -> Option<Sync> {
     let s = v.get("sync")?;
     if !s.is_object() {
         return None;
     }
-    Some(Sync { mode: text_at(s, "mode"), drive: sync_folder_at(s.get("drive")), exports: sync_folder_at(s.get("exports")) })
+    let side = |new: &str, old: &str| sync_folder_at(s.get(new)).or_else(|| sync_folder_at(s.get(old)));
+    Some(Sync {
+        mode: text_at(s, "mode"),
+        name: text_at(s, "name"),
+        download: side("download", "drive"),
+        upload: side("upload", "exports"),
+    })
 }
 
 /// One side of a `sync` object. A side that is absent, `null` or not an object
@@ -671,7 +679,8 @@ pub struct UploadLink {
     pub target_account_id: String,
     #[serde(default, deserialize_with = "nullable")]
     pub account_id: String,
-    /// The `.turbosort` marker: the `Live_Work` folder this project belongs to.
+    /// An older Portal's name for the project folder (`.turbosort`). A link
+    /// with one and no `sync` is one mirrored folder of that name.
     #[serde(default, deserialize_with = "nullable")]
     pub turbosort: String,
     /// The Frame.io folder, as an object or as a bare name.
@@ -1613,6 +1622,23 @@ mod tests {
         // And an empty base still produces a relative path rather than panicking:
         // `get` refuses before it ever uses it.
         assert_eq!(PortalClient::new("", "t").url("/api/health"), "/api/health");
+    }
+
+    #[test]
+    fn sync_reads_the_neutral_names_and_an_older_portals() {
+        let parse = |sync: &str| -> Option<Sync> {
+            let raw = format!(r#"{{"id":"L1","folder":{{"folder_id":"F1","account_id":"A1","sync":{sync}}}}}"#);
+            serde_json::from_str::<UploadLink>(&raw).expect("parses").folder.sync
+        };
+        assert_eq!(parse("{}"), Some(Sync::default()), "ticked, with every default");
+        assert_eq!(parse("null"), None, "not ticked");
+        let s = parse(r#"{"name":"Acme","download":{"local":"IN"},"upload":{"local":"OUT","folder_id":"FX"}}"#).unwrap();
+        assert_eq!(s.name, "Acme");
+        assert_eq!(s.download, Some(SyncFolder { local: "IN".into(), folder_id: String::new() }));
+        assert_eq!(s.upload, Some(SyncFolder { local: "OUT".into(), folder_id: "FX".into() }));
+        let old = parse(r#"{"mode":"add_only","drive":{"local":"1_DRIVE"},"exports":{"local":"0_EXPORTS","folder_id":"FX"}}"#).unwrap();
+        assert_eq!(old.download.unwrap().local, "1_DRIVE");
+        assert_eq!(old.upload.unwrap().folder_id, "FX");
     }
 
     #[test]

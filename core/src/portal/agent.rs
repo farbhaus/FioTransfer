@@ -1,31 +1,28 @@
-//! The reconciler: Portal's `.turbosort` markers become watch folders.
+//! The reconciler: Portal links ticked "Sync to FioTransfer" become watch folders.
 //!
-//! Portal publishes upload/download links and writes a `.turbosort` marker into
-//! a link's Frame.io folder. The marker names the `Live_Work` folder the project
-//! belongs to. For every link that carries one, this module keeps exactly one
-//! watch folder: local `portal_root/<marker>` <-> the link's Frame.io folder,
-//! both ways (`mirror`).
+//! Each synced link (one whose `folder` carries a `sync` object,
+//! [`crate::portal::Sync`]) gets a project folder, `portal_root/<project>`, named
+//! by [`project_folder`], holding up to two one-way folders owned by that link:
 //!
-//! A link whose `folder` carries a `sync` object ([`crate::portal::Sync`]) is
-//! **two one-way folders** instead of one mirror, both under the same marker
-//! folder and both owned by that link:
+//! * `<project>/IN` ← the link's Frame.io folder: `download`, what the client
+//!   sends;
+//! * `<project>/OUT` → `sync.upload.folder_id`: `upload`, what goes back. Only
+//!   when Portal names that folder.
 //!
-//! * `portal_root/<marker>/<drive.local>` ← the link's (or `drive`'s) Frame.io
-//!   folder: `download`, the folder the client sends into;
-//! * `portal_root/<marker>/<exports.local>` → `exports.folder_id`: `upload`, the
-//!   folder we make things in. Only when Portal names it.
+//! IN and OUT are the user's defaults ([`Names`]); Portal may name either.
+//! A link from an older Portal that carries only a `turbosort` name is one
+//! mirrored folder, `portal_root/<turbosort>`, as before.
 //!
 //! The direction is what keeps deletions from propagating: a `download` watch
 //! never uploads and an `upload` watch never downloads, and nothing in this
 //! module or in the watch engine deletes a file because its opposite number
-//! disappeared. A mapping Portal stops asking for is **unwatched, not deleted**,
-//! exactly as a cleared marker has always been.
+//! disappeared. A folder Portal stops asking for is **unwatched, not deleted**.
 //!
 //! What it never does:
 //!
 //! * touch Portal (only `GET /api/upload-links` is called; no file goes there);
 //! * adopt Portal's `destination_path` / `path_template` — the local root is a
-//!   FioTransfer setting, and the folder name is the marker, one path segment;
+//!   FioTransfer setting, and each folder name is one path segment;
 //! * touch a watch the user made. Only a watch whose `origin` is
 //!   `portal:<link id>` may be updated or removed, and only while that link is
 //!   live and still asks for a folder;
@@ -44,17 +41,17 @@ use crate::portal::{PortalClient, SyncFolder, UploadLink, SYNC_ADD_ONLY};
 
 /// The origin a Portal-owned watch carries: `portal:<link id>`.
 ///
-/// That is the drive side of a `sync` link, and the only watch a link has when
-/// Portal sends no `sync` at all.
+/// That is a synced link's download watch, or an older Portal's mirrored one.
 pub fn origin_of(link_id: &str) -> String {
     format!("portal:{}", link_id)
 }
 
-/// The origin of a `sync` link's exports watch: `portal:<link id>#exports`.
+/// The origin of a synced link's upload watch: `portal:<link id>#exports` (the
+/// name predates "upload", and existing watches carry it).
 ///
-/// A different origin from the drive watch's, on purpose: the reconciler removes
-/// a watch only when its own origin is no longer wanted, so clearing the exports
-/// folder in Portal removes that one watch and leaves the drive watch alone. The
+/// A different origin from the download watch's, on purpose: the reconciler
+/// removes a watch only when its own origin is no longer wanted, so clearing the
+/// upload folder in Portal removes that one watch and leaves the other alone. The
 /// `#` cannot appear in a Portal link id that reaches this module (see `plan`),
 /// so the two origins of one link and of two links never collide.
 pub fn exports_origin_of(link_id: &str) -> String {
@@ -173,7 +170,7 @@ fn check_segment(x: &str, what: &str) -> Result<(), String> {
 
 /// The marker, checked as one path segment.
 pub fn check_marker(x: &str) -> Result<(), String> {
-    check_segment(x, "the turbosort marker")
+    check_segment(x, "the folder name")
 }
 
 /// A `sync` mapping's `local`, checked by the same rule and for the same reason:
@@ -269,7 +266,7 @@ pub async fn preview(app: &App) -> Report {
     };
     rep.links_seen = links.len();
     let root = s.portal_root_path();
-    let targets = plan(&links, &root, &s.portal_change_rule(), &mut rep);
+    let targets = plan(&links, &root, &Names::of(&s), &s.portal_change_rule(), &mut rep);
     rep.ensured = targets.len();
     rep.planned = targets.iter().map(|t| t.local.clone()).collect();
     // Removals are knowable too: Portal-owned watches whose link is not in today's
@@ -299,7 +296,7 @@ fn apply(app: &App, links: &[UploadLink], rep: &mut Report) {
         rep.error = format!("can't create {}: {}", root.display(), e);
         return;
     }
-    let targets = plan(links, &root, &s.portal_change_rule(), rep);
+    let targets = plan(links, &root, &Names::of(&s), &s.portal_change_rule(), rep);
     let wanted: BTreeSet<String> = targets.iter().map(|t| t.origin.clone()).collect();
 
     // First: Portal-owned watches that Portal no longer asks for. A user's watch
@@ -354,12 +351,19 @@ fn apply(app: &App, links: &[UploadLink], rep: &mut Report) {
             continue;
         }
 
+        // An IN folder takes what is already in its Frame.io folder: a client
+        // may upload before the next reconcile, or while the app is closed, and
+        // a file already on disk with the same name and size is skipped anyway.
+        // OUT and an older Portal's mirror start from what is there, so nothing
+        // already on disk goes up again.
+        let existing = t.direction == DIR_DOWNLOAD;
+
         match mine.first() {
             Some(w) => {
                 if matches(w, t) {
                     continue; // already right: a second run changes nothing
                 }
-                match wat.update(&w.id, &t.local, &t.acct, &t.folder, &t.label, &t.direction, &t.rule, false) {
+                match wat.update(&w.id, &t.local, &t.acct, &t.folder, &t.label, &t.direction, &t.rule, existing) {
                     Ok(()) => {
                         rep.ensured += 1;
                         hist.log(&format!(
@@ -385,7 +389,7 @@ fn apply(app: &App, links: &[UploadLink], rep: &mut Report) {
                     });
                     continue;
                 }
-                match wat.add(&t.local, &t.acct, &t.folder, &t.label, &t.direction, &t.rule, false) {
+                match wat.add(&t.local, &t.acct, &t.folder, &t.label, &t.direction, &t.rule, existing) {
                     Ok(()) => {
                         // The watch is the watcher's now; it has to carry the
                         // origin that says Portal may take it away again.
@@ -452,14 +456,69 @@ fn arrow(direction: &str) -> &'static str {
     }
 }
 
+/// The names a synced link's folders get when Portal doesn't name them:
+/// `Settings::portal_in_folder` and `portal_out_folder` (IN and OUT).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Names {
+    pub download: String,
+    pub upload: String,
+}
+
+impl Names {
+    pub fn of(s: &crate::config::Settings) -> Names {
+        Names { download: s.portal_in_folder.clone(), upload: s.portal_out_folder.clone() }
+    }
+}
+
+/// The project's folder on disk: Portal's `sync.name`, else an older Portal's
+/// `turbosort`, else the link's own name made into one path segment. Portal's
+/// names are checked, not changed: a bad one is refused with its reason.
+pub fn project_folder(l: &UploadLink) -> String {
+    if let Some(name) = l.folder.sync.as_ref().map(|s| s.name.trim()).filter(|n| !n.is_empty()) {
+        return name.to_string();
+    }
+    let marker = l.marker();
+    if !marker.is_empty() {
+        return marker;
+    }
+    let name = segment_of(&l.label());
+    if name.is_empty() {
+        segment_of(&l.id)
+    } else {
+        name
+    }
+}
+
+/// A link's name as one path segment: `/`, `\`, `%` and control characters
+/// become `-`, it is cut to [`MAX_MARKER`] bytes, and a name of nothing but
+/// dots is no name at all.
+fn segment_of(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c == '%' || c.is_control() { '-' } else { c })
+        .collect();
+    let s = s.trim();
+    if s.chars().all(|c| c == '.') {
+        return String::new();
+    }
+    let mut end = s.len().min(MAX_MARKER);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 /// Turns Portal's rows into the watches they call for, reporting (not acting on)
 /// the ones that cannot be.
 ///
-/// A link with no `sync` plans one mirrored watch at `root/<marker>`, exactly as
-/// before. A link with one plans up to two: the drive folder `download`, the
-/// exports folder `upload`, each under `root/<marker>/`, each with its own
-/// origin so that either can be withdrawn without touching the other.
-fn plan(links: &[UploadLink], root: &Path, rule: &str, rep: &mut Report) -> Vec<Target> {
+/// A link ticked "Sync to FioTransfer" (it has a `sync`) plans a `download`
+/// watch at `root/<project>/<IN>`, and an `upload` watch at `root/<project>/<OUT>`
+/// when Portal names an upload folder, each with its own origin so either can
+/// be withdrawn alone. A link with only an older Portal's `turbosort` plans one
+/// mirrored watch at `root/<turbosort>`, as it always has. Any other link is
+/// left alone.
+fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut Report) -> Vec<Target> {
     let mut out: Vec<Target> = Vec::new();
     let mut claimed: BTreeSet<String> = BTreeSet::new();
     // Sorted by id so two runs over the same rows decide the same way.
@@ -478,39 +537,40 @@ fn plan(links: &[UploadLink], root: &Path, rule: &str, rep: &mut Report) -> Vec<
     }
 
     for (id, l) in by_id {
-        let marker = l.marker();
-        let skip = |reason: String| Skip { link: id.clone(), marker: marker.clone(), reason };
-        if marker.is_empty() {
-            // Portal is not asking for a watch: no target, and any watch this
-            // link used to own is removed by `apply`.
+        let sync = l.folder.sync.as_ref();
+        if sync.is_none() && l.marker().is_empty() {
+            // Not synced to FioTransfer: no target, and any watch this link
+            // used to own is removed by `apply`.
             continue;
         }
+        let name = project_folder(l);
+        let skip = |reason: String| Skip { link: id.clone(), marker: name.clone(), reason };
         if l.is_disabled() {
             rep.skipped.push(skip("the link is not live".to_string()));
             continue;
         }
-        if let Err(e) = check_marker(&marker) {
+        if let Err(e) = check_marker(&name) {
             rep.skipped.push(skip(e));
             continue;
         }
         let (acct, folder) = (l.acct(), l.dest_folder());
-        let base: PathBuf = root.join(&marker);
-        // Belt and braces: the join must stay directly under the root. A marker
+        let base: PathBuf = root.join(&name);
+        // Belt and braces: the join must stay directly under the root. A name
         // that slipped past `check_marker` would otherwise be able to leave it.
         if base.parent() != Some(root) {
             rep.skipped.push(skip(format!("{} is not directly under {}", base.display(), root.display())));
             continue;
         }
-        // A marker folder belongs to one link, `sync` or not: the lower id wins
-        // it, run after run. Its mappings live inside it, so a second link on
-        // the same marker could otherwise have its mirror walk the first link's
-        // one-way folders. Claimed only once the link has been cleared to make
+        // A project folder belongs to one link: the lower id wins it, run after
+        // run. Its folders live inside it, so a second link on the same name
+        // could otherwise have its mirror walk the first link's one-way
+        // folders. Claimed only once the link has been cleared to make
         // something, so a broken link never takes the folder from a good one.
         let base_s = base.to_string_lossy().into_owned();
         let label = l.label();
 
-        let Some(sync) = l.folder.sync.as_ref() else {
-            // No `sync`: today's link, today's watch, untouched.
+        let Some(sync) = sync else {
+            // An older Portal's `turbosort` and no `sync`: one mirrored folder.
             if acct.is_empty() || folder.is_empty() {
                 rep.skipped.push(skip(
                     "the link names no Frame.io account (or folder): Portal's /api/upload-links row seen here has no account_id"
@@ -524,7 +584,7 @@ fn plan(links: &[UploadLink], root: &Path, rule: &str, rep: &mut Report) -> Vec<
             }
             out.push(Target {
                 link: id.clone(),
-                marker,
+                marker: name,
                 local: base_s,
                 acct,
                 folder,
@@ -536,8 +596,8 @@ fn plan(links: &[UploadLink], root: &Path, rule: &str, rep: &mut Report) -> Vec<
             continue;
         };
 
-        // Two one-way folders. Every side needs the account the watches are made
-        // in, and there is no sensible default for that.
+        // Every folder needs the account its watch is made in, and there is no
+        // sensible default for that.
         if acct.is_empty() {
             rep.skipped.push(skip(
                 "the link names no Frame.io account: Portal's /api/upload-links row seen here has no account_id"
@@ -559,80 +619,59 @@ fn plan(links: &[UploadLink], root: &Path, rule: &str, rep: &mut Report) -> Vec<
                 SYNC_ADD_ONLY
             ));
         }
-        // The exports origin is `portal:<id>#exports`, so an id that already
-        // holds a `#` could name another link's watch. Such a link is refused
-        // rather than given an origin that might be somebody else's, and it says
-        // which part of it was the problem.
-        if sync.exports.is_some() && id.contains('#') {
+        // The upload watch's origin is `portal:<id>#exports`, so an id that
+        // already holds a `#` could name another link's watch. Such a link is
+        // refused rather than given an origin that might be somebody else's.
+        if sync.upload.is_some() && id.contains('#') {
             rep.skipped.push(skip(format!(
-                "the link id {:?} contains '#', which the exports watch's origin is built from",
+                "the link id {:?} contains '#', which the upload watch's origin is built from",
                 id
             )));
             continue;
         }
-        let ctx = LinkCtx { id: &id, marker: &marker, base: &base, acct: &acct, rule };
-        let drive_origin = origin_of(&id);
+        let ctx = LinkCtx { id: &id, marker: &name, base: &base, acct: &acct, rule };
+        let or_default = |local: &str, default: &str| {
+            let local = local.trim();
+            if local.is_empty() { default.to_string() } else { local.to_string() }
+        };
 
-        // The drive side: the folder the client sends into. Portal may name its
-        // own folder; without one it is the link's own folder.
-        let mut drive_local: Option<String> = None;
-        let mut drive_folder = String::new();
-        match sync.drive.as_ref() {
-            Some(d) => {
-                let f = if d.folder_id.is_empty() { folder.clone() } else { d.folder_id.clone() };
-                match mapping(&ctx, &mut claimed, "drive", d, &f, DIR_DOWNLOAD, drive_origin.clone(), label.clone()) {
-                    Ok(t) => {
-                        // The names as Portal wrote them, so "both locals are
-                        // the same folder" is decided on what Portal said and
-                        // not on what it happened to resolve to.
-                        drive_local = Some(d.local.clone());
-                        drive_folder = t.folder.clone();
-                        out.push(t);
-                    }
-                    Err(e) => rep.skipped.push(skip(e)),
-                }
-            }
-            None => rep.notes.push(format!(
-                "link {}: sync names no drive folder, so nothing is downloaded for it",
-                id
-            )),
+        // The download side: the folder the client sends into. Portal may name
+        // its Frame.io folder and its local name; without them it is the link's
+        // own folder, into the user's IN folder.
+        let d = sync.download.clone().unwrap_or_default();
+        let down = SyncFolder { local: or_default(&d.local, &names.download), folder_id: d.folder_id };
+        let down_folder = if down.folder_id.is_empty() { folder.clone() } else { down.folder_id.clone() };
+        match mapping(&ctx, &mut claimed, "download", &down, &down_folder, DIR_DOWNLOAD, origin_of(&id), label.clone()) {
+            Ok(t) => out.push(t),
+            Err(e) => rep.skipped.push(skip(e)),
         }
 
-        // The exports side: the folder we make things in. Only when Portal names
-        // one, and never in the drive folder's place.
-        if let Some(x) = sync.exports.as_ref() {
-            if x.folder_id.is_empty() {
+        // The upload side: only when Portal names its Frame.io folder, and
+        // never the download folder's.
+        if let Some(x) = sync.upload.as_ref() {
+            let up = SyncFolder { local: or_default(&x.local, &names.upload), folder_id: x.folder_id.clone() };
+            if up.folder_id.is_empty() {
                 rep.skipped.push(skip(
-                    "the sync exports folder names no folder_id: the link's own folder is already the drive's"
-                        .to_string(),
+                    "the upload folder names no folder_id: the link's own folder is already the download's".to_string(),
                 ));
                 continue;
             }
-            if drive_local.as_deref() == Some(x.local.as_str()) {
+            if up.local == down.local {
                 rep.skipped.push(skip(format!(
-                    "the exports folder {:?} is the drive folder: one folder cannot be both one-way",
-                    x.local
+                    "the upload folder {:?} is the download folder: one folder cannot be both one-way",
+                    up.local
                 )));
                 continue;
             }
-            if x.folder_id == drive_folder && !drive_folder.is_empty() {
+            if up.folder_id == down_folder {
                 rep.skipped.push(skip(format!(
-                    "the exports folder is Frame.io folder {} already, the drive's: one folder cannot be both one-way",
-                    x.folder_id
+                    "the upload folder is Frame.io folder {} already, the download's: one folder cannot be both one-way",
+                    up.folder_id
                 )));
                 continue;
             }
-            let x_label = format!("{} ({})", label, x.local);
-            match mapping(
-                &ctx,
-                &mut claimed,
-                "exports",
-                x,
-                &x.folder_id,
-                DIR_UPLOAD,
-                exports_origin_of(&id),
-                x_label,
-            ) {
+            let up_label = format!("{} ({})", label, up.local);
+            match mapping(&ctx, &mut claimed, "upload", &up, &up.folder_id, DIR_UPLOAD, exports_origin_of(&id), up_label) {
                 Ok(t) => out.push(t),
                 Err(e) => rep.skipped.push(skip(e)),
             }
@@ -659,7 +698,7 @@ fn mapping(
     label: String,
 ) -> Result<Target, String> {
     if let Err(e) = check_local(&m.local) {
-        return Err(format!("the sync {} folder: {}", side, e));
+        return Err(format!("the {} folder: {}", side, e));
     }
     let local = ctx.base.join(&m.local);
     // Belt and braces, as for the marker: the mapping must stay inside the
@@ -668,7 +707,7 @@ fn mapping(
         return Err(format!("{} is not directly under {}", local.display(), ctx.base.display()));
     }
     if folder.is_empty() {
-        return Err(format!("the sync {} folder names no Frame.io folder", side));
+        return Err(format!("the {} folder names no Frame.io folder", side));
     }
     let local = local.to_string_lossy().into_owned();
     if !claimed.insert(local.clone()) {
@@ -742,10 +781,18 @@ mod tests {
         }
     }
 
+    fn names() -> Names {
+        Names { download: "IN".to_string(), upload: "OUT".to_string() }
+    }
+
     fn plan_of(links: &[UploadLink]) -> (Vec<Target>, Report) {
+        plan_named(links, &names())
+    }
+
+    fn plan_named(links: &[UploadLink], names: &Names) -> (Vec<Target>, Report) {
         let mut rep = Report::default();
-        let root = Path::new("/root/Live_Work");
-        let t = plan(links, root, ON_CHANGE_OVERWRITE, &mut rep);
+        let root = Path::new("/root/Portal");
+        let t = plan(links, root, names, ON_CHANGE_OVERWRITE, &mut rep);
         (t, rep)
     }
 
@@ -768,7 +815,7 @@ mod tests {
     ) -> UploadLink {
         let mut l = link(id, marker);
         l.folder = crate::portal::Folder {
-            sync: Some(crate::portal::Sync { mode: mode.to_string(), drive, exports }),
+            sync: Some(crate::portal::Sync { mode: mode.to_string(), name: String::new(), download: drive, upload: exports }),
             ..Default::default()
         };
         l
@@ -787,7 +834,7 @@ mod tests {
         let (t, rep) = plan_of(&[link("L1", "Rakete")]);
         assert_eq!(t.len(), 1);
         assert!(rep.skipped.is_empty());
-        assert_eq!(t[0].local, "/root/Live_Work/Rakete");
+        assert_eq!(t[0].local, "/root/Portal/Rakete");
         assert_eq!(t[0].acct, "A1");
         assert_eq!(t[0].folder, "FL1");
         assert_eq!(t[0].label, "Link L1");
@@ -832,7 +879,7 @@ mod tests {
     #[test]
     fn the_change_rule_is_the_one_asked_for() {
         let mut rep = Report::default();
-        let t = plan(&[link("L1", "X")], Path::new("/r"), ON_CHANGE_KEEP, &mut rep);
+        let t = plan(&[link("L1", "X")], Path::new("/r"), &names(), ON_CHANGE_KEEP, &mut rep);
         assert_eq!(t[0].rule, ON_CHANGE_KEEP);
         assert_eq!(ON_CHANGE_KEEP, "keep");
     }
@@ -876,7 +923,7 @@ mod tests {
         let (t, rep) = plan_of(&[sync_link("L1", "Rakete", side("1_DRIVE", ""), None)]);
         assert!(rep.skipped.is_empty(), "{:?}", rep.skipped);
         assert_eq!(t.len(), 1);
-        assert_eq!(locals(&t), vec!["/root/Live_Work/Rakete/1_DRIVE"]);
+        assert_eq!(locals(&t), vec!["/root/Portal/Rakete/1_DRIVE"]);
         assert_eq!(t[0].direction, DIR_DOWNLOAD, "the drive folder only ever comes down");
         assert_eq!(t[0].folder, "FL1", "no folder_id on the drive side: the link's own folder");
         assert_eq!(t[0].acct, "A1");
@@ -891,7 +938,7 @@ mod tests {
         let l = sync_link("L1", "Rakete", side("1_DRIVE", "FD"), side("0_EXPORTS", "FX"));
         let (t, rep) = plan_of(&[l]);
         assert!(rep.skipped.is_empty(), "{:?}", rep.skipped);
-        assert_eq!(locals(&t), vec!["/root/Live_Work/Rakete/1_DRIVE", "/root/Live_Work/Rakete/0_EXPORTS"]);
+        assert_eq!(locals(&t), vec!["/root/Portal/Rakete/1_DRIVE", "/root/Portal/Rakete/0_EXPORTS"]);
         assert_eq!(t[0].direction, DIR_DOWNLOAD);
         assert_eq!(t[0].folder, "FD");
         assert_eq!(t[1].direction, DIR_UPLOAD, "the exports folder only ever goes up");
@@ -904,35 +951,35 @@ mod tests {
 
     #[test]
     fn a_local_that_is_not_one_segment_refuses_that_mapping_and_no_other() {
-        for bad in ["", ".", "..", "a/b", "a\\b", "a%b", "a\nb"] {
+        for bad in [".", "..", "a/b", "a\\b", "a%b", "a\nb"] {
             let l = sync_link("L1", "Rakete", side(bad, ""), side("0_EXPORTS", "FX"));
             let (t, rep) = plan_of(&[l]);
-            assert_eq!(locals(&t), vec!["/root/Live_Work/Rakete/0_EXPORTS"], "{:?} made a drive watch", bad);
+            assert_eq!(locals(&t), vec!["/root/Portal/Rakete/0_EXPORTS"], "{:?} made a drive watch", bad);
             assert_eq!(rep.skipped.len(), 1, "{:?} said nothing: {:?}", bad, rep.skipped);
-            assert!(rep.skipped[0].reason.contains("sync drive folder"), "{}", rep.skipped[0].reason);
+            assert!(rep.skipped[0].reason.contains("the download folder"), "{}", rep.skipped[0].reason);
             assert_eq!(t[0].direction, DIR_UPLOAD);
         }
         // …and the exports side is checked by the same rule.
         let l = sync_link("L1", "Rakete", side("1_DRIVE", ""), side("../out", "FX"));
         let (t, rep) = plan_of(&[l]);
-        assert_eq!(locals(&t), vec!["/root/Live_Work/Rakete/1_DRIVE"]);
-        assert!(rep.skipped[0].reason.contains("sync exports folder"), "{}", rep.skipped[0].reason);
+        assert_eq!(locals(&t), vec!["/root/Portal/Rakete/1_DRIVE"]);
+        assert!(rep.skipped[0].reason.contains("the upload folder"), "{}", rep.skipped[0].reason);
     }
 
     #[test]
     fn one_local_twice_refuses_the_second_mapping() {
         let l = sync_link("L1", "Rakete", side("SAME", "FD"), side("SAME", "FX"));
         let (t, rep) = plan_of(&[l]);
-        assert_eq!(locals(&t), vec!["/root/Live_Work/Rakete/SAME"]);
+        assert_eq!(locals(&t), vec!["/root/Portal/Rakete/SAME"]);
         assert_eq!(t[0].direction, DIR_DOWNLOAD);
-        assert!(rep.skipped[0].reason.contains("is the drive folder"), "{}", rep.skipped[0].reason);
+        assert!(rep.skipped[0].reason.contains("is the download folder"), "{}", rep.skipped[0].reason);
     }
 
     #[test]
     fn one_frame_io_folder_cannot_be_read_and_written_at_once() {
         let l = sync_link("L1", "Rakete", side("1_DRIVE", "F"), side("0_EXPORTS", "F"));
         let (t, rep) = plan_of(&[l]);
-        assert_eq!(locals(&t), vec!["/root/Live_Work/Rakete/1_DRIVE"]);
+        assert_eq!(locals(&t), vec!["/root/Portal/Rakete/1_DRIVE"]);
         assert!(rep.skipped[0].reason.contains("one folder cannot be both one-way"), "{}", rep.skipped[0].reason);
     }
 
@@ -962,12 +1009,84 @@ mod tests {
     }
 
     #[test]
-    fn a_sync_link_without_a_drive_side_says_so_and_makes_only_what_it_can() {
+    fn a_sync_link_without_a_download_side_still_gets_its_in_folder() {
         let l = sync_link("L1", "Rakete", None, side("0_EXPORTS", "FX"));
         let (t, rep) = plan_of(&[l]);
-        assert_eq!(locals(&t), vec!["/root/Live_Work/Rakete/0_EXPORTS"]);
-        assert_eq!(t[0].direction, DIR_UPLOAD);
-        assert!(rep.notes.iter().any(|n| n.contains("no drive folder")), "{:?}", rep.notes);
+        assert!(rep.skipped.is_empty() && rep.notes.is_empty(), "{:?} {:?}", rep.skipped, rep.notes);
+        assert_eq!(locals(&t), vec!["/root/Portal/Rakete/IN", "/root/Portal/Rakete/0_EXPORTS"]);
+        assert_eq!(t[0].direction, DIR_DOWNLOAD);
+        assert_eq!(t[0].folder, "FL1", "the link's own folder");
+        assert_eq!(t[1].direction, DIR_UPLOAD);
+    }
+
+    // ---------- the neutral contract ----------
+
+    /// A link ticked "Sync to FioTransfer": `"sync": {}` and nothing else.
+    fn ticked(id: &str, name: &str) -> UploadLink {
+        let mut l = link(id, "");
+        l.name = name.to_string();
+        l.folder = crate::portal::Folder { sync: Some(crate::portal::Sync::default()), ..Default::default() };
+        l
+    }
+
+    #[test]
+    fn a_ticked_link_is_a_folder_named_after_it_with_in_inside() {
+        let (t, rep) = plan_of(&[ticked("L1", "Acme Spot 30s")]);
+        assert!(rep.skipped.is_empty() && rep.notes.is_empty(), "{:?} {:?}", rep.skipped, rep.notes);
+        assert_eq!(locals(&t), vec!["/root/Portal/Acme Spot 30s/IN"]);
+        assert_eq!(t[0].direction, DIR_DOWNLOAD);
+        assert_eq!(t[0].folder, "FL1");
+        assert_eq!(t[0].origin, origin_of("L1"));
+    }
+
+    #[test]
+    fn a_link_that_is_not_ticked_is_left_alone() {
+        let (t, rep) = plan_of(&[link("L1", "")]);
+        assert!(t.is_empty());
+        assert!(rep.skipped.is_empty(), "not asking is not a refusal: {:?}", rep.skipped);
+    }
+
+    #[test]
+    fn the_users_names_are_the_defaults_and_portals_own_win() {
+        let mine = Names { download: "Footage".to_string(), upload: "Exports".to_string() };
+        let mut l = ticked("L1", "Acme");
+        l.folder.sync = Some(crate::portal::Sync { upload: side("", "FX"), ..Default::default() });
+        let (t, _) = plan_named(&[l.clone()], &mine);
+        assert_eq!(locals(&t), vec!["/root/Portal/Acme/Footage", "/root/Portal/Acme/Exports"]);
+        assert_eq!(t[1].label, "Acme (Exports)");
+
+        l.folder.sync = Some(crate::portal::Sync { download: side("RUSHES", ""), upload: side("", "FX"), ..Default::default() });
+        let (t, _) = plan_named(&[l], &mine);
+        assert_eq!(locals(&t), vec!["/root/Portal/Acme/RUSHES", "/root/Portal/Acme/Exports"], "Portal's name wins");
+    }
+
+    #[test]
+    fn sync_name_names_the_project_and_wins_over_turbosort() {
+        let mut l = sync_link("L1", "Rakete", None, None);
+        l.folder.sync.as_mut().unwrap().name = "ACME_2026".to_string();
+        assert_eq!(project_folder(&l), "ACME_2026");
+        let (t, _) = plan_of(&[l]);
+        assert_eq!(locals(&t), vec!["/root/Portal/ACME_2026/IN"]);
+        // Portal's names are checked, not rewritten.
+        let mut bad = sync_link("L2", "", None, None);
+        bad.folder.sync.as_mut().unwrap().name = "../etc".to_string();
+        let (t, rep) = plan_of(&[bad]);
+        assert!(t.is_empty());
+        assert!(rep.skipped[0].reason.contains("one path segment"), "{}", rep.skipped[0].reason);
+    }
+
+    #[test]
+    fn a_links_own_name_is_made_into_one_path_segment() {
+        assert_eq!(segment_of("  Acme / Spot 50% \\ v2  "), "Acme - Spot 50- - v2");
+        assert_eq!(segment_of("Ümlaut\tname"), "Ümlaut-name");
+        assert_eq!(segment_of(".."), "");
+        assert_eq!(segment_of("   "), "");
+        let long = "é".repeat(200);
+        let cut = segment_of(&long);
+        assert!(cut.len() <= MAX_MARKER && check_marker(&cut).is_ok());
+        // A name that is no name falls back to the link's id.
+        let l = ticked("L9", "..");
+        assert_eq!(project_folder(&l), "L9");
     }
 
     #[test]

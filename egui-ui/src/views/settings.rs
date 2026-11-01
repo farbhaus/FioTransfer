@@ -9,10 +9,11 @@
 //! `.about` line.
 //!
 //! Below them is a fifth section the webview never had: **Portal**, the service
-//! that publishes this project's links and names the `Live_Work` folder each one
-//! belongs to. It is four settings (`App::set_portal` writes them: the address,
-//! the local folder, the on/off flag and — to the keychain, never to
-//! settings.json — the bearer token), one status line from `App::portal_status`,
+//! that publishes upload links; each link ticked "Sync to FioTransfer" gets a
+//! project folder here. It is four settings (`App::set_portal` writes them: the
+//! address, the local folder, the on/off flag and — to the keychain, never to
+//! settings.json — the bearer token), the IN / OUT folder names
+//! (`App::set_portal_folders`), one status line from `App::portal_status`,
 //! and a "Reconcile now". Two credentials get in: a pasted access token, or
 //! Portal's own sign-in ("Sign in instead", `App::portal_sign_in`), whose session
 //! cookie is kept and whose password is not. It draws with the same rows as
@@ -22,11 +23,12 @@
 //! the page head; the tokens come from [`crate::theme`]. `.settings
 //! { max-width: 680px }` is applied here because it is this screen's own measure.
 
+use crate::icons::{self, Icon};
 use crate::model::{PortalView, Request, Secret, UiState};
 use crate::theme;
 use egui::{
     Align, Checkbox, CollapsingHeader, Color32, ComboBox, CornerRadius, Frame, Layout, Margin,
-    RichText, Slider, Stroke, TextEdit, vec2,
+    RichText, Sense, Slider, Stroke, TextEdit, vec2,
 };
 
 /// `.settings { max-width: 680px }`.
@@ -94,8 +96,10 @@ pub enum Action {
     /// The Portal address, committed from its field on Enter or focus loss. It
     /// has already passed [`portal_url_reason`]: a refused value never gets here.
     SetPortalUrl(String),
-    /// The local folder Portal's markers are mirrored under.
+    /// The local folder the synced links' project folders go in.
     SetPortalRoot(String),
+    /// The IN and OUT folder names, both checked by [`portal_folders_reason`].
+    SetPortalFolders { download: String, upload: String },
     /// "Save" next to the access token: the token, on its way to the keychain.
     SavePortalToken(Secret),
     /// "Forget" next to the access token.
@@ -152,6 +156,7 @@ fn ask(state: &mut UiState, action: Action) {
         Action::ShowLogs => state.ask(Request::OpenLogs),
         Action::SetPortalUrl(url) => state.ask(Request::SetPortalUrl(url)),
         Action::SetPortalRoot(root) => state.ask(Request::SetPortalRoot(root)),
+        Action::SetPortalFolders { download, upload } => state.ask(Request::SetPortalFolders { download, upload }),
         Action::SavePortalToken(token) => state.ask(Request::SetPortalToken(token)),
         Action::ForgetPortalToken => state.ask(Request::ForgetPortalToken),
         Action::SignInPortal { email, password } => {
@@ -250,6 +255,8 @@ pub fn show_with_actions(ui: &mut egui::Ui, state: &mut UiState) -> Option<Actio
             }
             rule(ui);
             portal_root_line(ui, state, &mut action);
+            rule(ui);
+            portal_folders_line(ui, state, &mut action);
             rule(ui);
             portal_enabled_line(ui, state, &mut action);
             rule(ui);
@@ -802,7 +809,7 @@ pub fn short_path(path: &str, home: &str) -> String {
 const PORTAL_URL_HINT: &str = "https://portal.example.com";
 /// The folder field's placeholder: `Settings::PORTAL_ROOT_DIR` under `HOME`, in
 /// the words the field can take back (`Settings::portal_root_path` expands it).
-const PORTAL_ROOT_HINT: &str = "~/Live_Work";
+const PORTAL_ROOT_HINT: &str = "~/Portal";
 /// The token field's placeholder. The field never shows the stored token, so an
 /// empty field says which of the two states it is in instead.
 const TOKEN_STORED: &str = "stored in your keychain";
@@ -847,7 +854,7 @@ pub fn portal_url_reason(url: &str) -> Option<String> {
 
 /// Why this local folder cannot be used, or `None` when it can.
 ///
-/// Empty means "the default", which is `~/Live_Work`. The disk root is refused
+/// Empty means "the default", which is `~/Portal`. The disk root is refused
 /// here because `Settings::normalize` would silently replace it: a setting that
 /// cannot be saved is better refused out loud.
 pub fn portal_root_reason(root: &str) -> Option<String> {
@@ -867,7 +874,7 @@ pub fn portal_root_reason(root: &str) -> Option<String> {
     None
 }
 
-/// `~/Live_Work` with the home expanded: the absolute path Portal's folders are
+/// `~/Portal` with the home expanded: the absolute path Portal's folders are
 /// actually created under.
 ///
 /// The same expansion as `Settings::portal_root_path`, in strings: the browser
@@ -876,7 +883,7 @@ pub fn portal_root_reason(root: &str) -> Option<String> {
 pub fn resolved_portal_root(root: &str, home: &str) -> String {
     let home = home.trim().trim_end_matches('/');
     let root = root.trim();
-    let root = if root.is_empty() { format!("{home}/Live_Work") } else { root.to_string() };
+    let root = if root.is_empty() { format!("{home}/Portal") } else { root.to_string() };
     match root.strip_prefix('~') {
         Some(rest) if rest.is_empty() => home.to_string(),
         Some(rest) => match rest.strip_prefix('/') {
@@ -978,6 +985,10 @@ pub fn portal_line(status: &PortalView) -> PortalLine {
 /// side, the full width it is given.
 fn portal_field(ui: &mut egui::Ui, text: &mut String, hint: &str) -> egui::Response {
     let width = ui.available_width();
+    portal_field_sized(ui, text, hint, width)
+}
+
+fn portal_field_sized(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> egui::Response {
     ui.scope(|ui| {
         ui.style_mut().visuals.extreme_bg_color = theme::SURFACE;
         ui.add(
@@ -1300,6 +1311,99 @@ fn portal_root_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<
                     help_line(ui, &format!("Folders are created under {resolved}"));
                 }
             }
+        }
+    });
+}
+
+/// Why these IN / OUT names cannot be used, or `None` when they can. The same
+/// rule as `App::set_portal_folders`: one path segment each, and not the same.
+/// Empty fields are the defaults, IN and OUT.
+pub fn portal_folders_reason(download: &str, upload: &str) -> Option<String> {
+    let (download, upload) = portal_folder_names(download, upload);
+    for name in [&download, &upload] {
+        if name == "." || name == ".." {
+            return Some(format!("{name} is not a folder name"));
+        }
+        if name.len() > 255 {
+            return Some("A folder name is at most 255 bytes".to_string());
+        }
+        if name.chars().any(|c| c == '/' || c == '\\' || c == '%' || c.is_control()) {
+            return Some("Folder names can't contain /, \\ or %".to_string());
+        }
+    }
+    if download == upload {
+        return Some("IN and OUT need different names".to_string());
+    }
+    None
+}
+
+/// The names as typed, trimmed, with an empty one back to its default.
+fn portal_folder_names(download: &str, upload: &str) -> (String, String) {
+    let or = |typed: &str, default: &str| {
+        let typed = typed.trim();
+        if typed.is_empty() { default.to_string() } else { typed.to_string() }
+    };
+    (or(download, "IN"), or(upload, "OUT"))
+}
+
+/// "Folder names": what each project's two folders are called when Portal
+/// doesn't name them — ↓ the one the link's uploads come down into, ↑ the one
+/// that goes back up. Committed when a field loses focus.
+fn portal_folders_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<Action>) {
+    let (mut down, mut up) = state
+        .portal
+        .folders_draft
+        .clone()
+        .unwrap_or_else(|| (state.settings.portal_in_folder.clone(), state.settings.portal_out_folder.clone()));
+    line(ui, |ui| {
+        let label = field_label(ui, "Folder names");
+        ui.add_space(theme::space::M);
+        let glyph = theme::icon::CONTROL;
+        let width = ((ui.available_width() - 2.0 * (glyph + theme::space::S) - theme::space::XL) / 2.0).max(60.0);
+        let (mut changed, mut left) = (false, false);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let fields = [
+                (&mut down, Icon::Down, "IN", "Downloaded from Frame.io"),
+                (&mut up, Icon::Up, "OUT", "Uploaded to Frame.io"),
+            ];
+            for (i, (text, icon, hint, tip)) in fields.into_iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(theme::space::XL);
+                }
+                let (slot, _) = ui.allocate_exact_size(vec2(glyph, theme::size::CONTROL_H), Sense::hover());
+                icons::paint(ui.painter(), slot.center(), glyph, icon, theme::TEXT_3);
+                ui.add_space(theme::space::S);
+                let response = portal_field_sized(ui, text, hint, width).labelled_by(label.id).on_hover_text(tip);
+                changed |= response.changed();
+                left |= response.lost_focus();
+            }
+        });
+        if changed {
+            state.portal.folders_draft = Some((down.clone(), up.clone()));
+            state.portal.folders_error = None;
+        }
+        if left {
+            match portal_folders_reason(&down, &up) {
+                None => {
+                    let (download, upload) = portal_folder_names(&down, &up);
+                    state.portal.folders_draft = None;
+                    state.portal.folders_error = None;
+                    if download != state.settings.portal_in_folder || upload != state.settings.portal_out_folder {
+                        state.settings.portal_in_folder = download.clone();
+                        state.settings.portal_out_folder = upload.clone();
+                        *action = Some(Action::SetPortalFolders { download, upload });
+                    }
+                }
+                Some(reason) => {
+                    state.portal.folders_draft = Some((down.clone(), up.clone()));
+                    state.portal.folders_error = Some(reason);
+                }
+            }
+        }
+        if let Some(reason) = state.portal.folders_error.clone() {
+            ui.add_space(theme::space::XXS);
+            reason_line(ui, &reason);
         }
     });
 }
@@ -2082,7 +2186,7 @@ mod tests {
     fn portal_state() -> UiState {
         let mut ui_state = state(configured(), true);
         ui_state.settings.portal_url = "https://portal.example.com".to_string();
-        ui_state.settings.portal_root = "/Users/chaos/Live_Work".to_string();
+        ui_state.settings.portal_root = "/Users/chaos/Portal".to_string();
         ui_state.settings.portal_enabled = true;
         ui_state.portal.status = PortalView {
             enabled: true,
@@ -2092,7 +2196,7 @@ mod tests {
             // one, and "Signed in as …" belongs to `session_state`.
             email: String::new(),
             url: "https://portal.example.com".to_string(),
-            root: "/Users/chaos/Live_Work".to_string(),
+            root: "/Users/chaos/Portal".to_string(),
             running: false,
             last_at: NOW - 120_000,
             links_seen: 2,
@@ -2137,7 +2241,7 @@ mod tests {
         // The address and the folder are what the settings hold. The folder is
         // already absolute, so no line repeats it.
         assert!(every_word(&harness).contains(&"https://portal.example.com".to_string()));
-        assert!(harness.query_by_label("Folders are created under /Users/chaos/Live_Work").is_none());
+        assert!(harness.query_by_label("Folders are created under /Users/chaos/Portal").is_none());
     }
 
     #[test]
@@ -2146,8 +2250,8 @@ mod tests {
         // expands it, so the row never shows a path nobody can check.
         assert_eq!(resolved_portal_root("~/Live_Work", "/Users/chaos"), "/Users/chaos/Live_Work");
         assert_eq!(resolved_portal_root("/Volumes/Raid/Live", "/Users/chaos"), "/Volumes/Raid/Live");
-        // Empty means the default, which is `~/Live_Work`.
-        assert_eq!(resolved_portal_root("", "/Users/chaos"), "/Users/chaos/Live_Work");
+        // Empty means the default, which is `~/Portal`.
+        assert_eq!(resolved_portal_root("", "/Users/chaos"), "/Users/chaos/Portal");
         assert_eq!(resolved_portal_root("~", "/Users/chaos"), "/Users/chaos");
         assert_eq!(resolved_portal_root("~ada/Live", "/Users/chaos"), "~ada/Live", "another user's home is taken as given");
         assert_eq!(resolved_portal_root("/Users/chaos/", "/Users/chaos/"), "/Users/chaos/");
@@ -2226,6 +2330,57 @@ mod tests {
         assert!(portal_url_reason("https://").is_some(), "a scheme with no host is not an address");
         assert!(portal_url_reason("https:///").is_some());
         assert!(portal_url_reason("https://portal example.com").is_some(), "a space is not an address");
+    }
+
+    #[test]
+    fn the_folder_names_are_one_segment_each_and_not_the_same() {
+        assert_eq!(portal_folders_reason("IN", "OUT"), None);
+        assert_eq!(portal_folders_reason("", ""), None, "empty is the default");
+        assert_eq!(portal_folders_reason("Footage", " Exports "), None);
+        for (down, up) in [("a/b", "OUT"), ("IN", ".."), ("50%", "OUT"), ("IN", "a\\b"), ("Same", "Same")] {
+            assert!(portal_folders_reason(down, up).is_some(), "{down:?} {up:?}");
+        }
+        assert!(portal_folders_reason("", "IN").is_some(), "an empty IN is IN, so OUT may not be IN too");
+    }
+
+    #[test]
+    fn a_new_out_name_is_committed_and_asks_the_app() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::NodeT as _;
+        let mut harness = screen_harness(portal_state());
+        let field = |h: &Harness<'static, UiState>, value: &str| {
+            h.get_all_by_role(Role::TextInput)
+                .find(|n| n.accesskit_node().value().as_deref() == Some(value))
+                .is_some()
+        };
+        assert!(field(&harness, "IN") && field(&harness, "OUT"), "both names, from the settings");
+
+        let out = harness
+            .get_all_by_role(Role::TextInput)
+            .find(|n| n.accesskit_node().value().as_deref() == Some("OUT"))
+            .expect("the OUT field");
+        out.focus();
+        harness.run();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness
+            .get_all_by_role(Role::TextInput)
+            .find(|n| n.accesskit_node().value().as_deref() == Some("OUT"))
+            .expect("the OUT field")
+            .type_text("Exports");
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+
+        assert!(
+            harness.state().requests.contains(&Request::SetPortalFolders {
+                download: "IN".to_string(),
+                upload: "Exports".to_string()
+            }),
+            "requests: {:?}",
+            harness.state().requests
+        );
+        assert_eq!(harness.state().settings.portal_out_folder, "Exports");
+        assert_eq!(harness.state().portal.folders_draft, None);
     }
 
     #[test]

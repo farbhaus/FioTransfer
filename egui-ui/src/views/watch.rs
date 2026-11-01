@@ -6,15 +6,11 @@
 //! file count, the last transfer, and the row's actions (pause/resume, edit,
 //! show in Finder, remove). The empty state is "No watch folders".
 //!
-//! A Portal-managed project is one job, not two rows: a **Smart In/Out Tray**
-//! whose title line is the project's name and then `· Smart In/Out Tray` in the
-//! row's detail style, with a line per sync lane under it — `Inbound (In Tray)`
-//! and `Outbound (Out Tray)` — because Portal publishes a project as two one-way
-//! folders and the person watching it sees one job. The job's title line also
-//! carries `Open in Portal`, which opens the project's link on the Portal server.
-//! A duplex with one lane configured shows that lane and says plainly which one
-//! is missing. A watch the user made is still one row of its own, drawn exactly
-//! as it was.
+//! A project synced from Portal is one job, not two rows: its name on the title
+//! line, marked Portal, with a line under it for each of its folders, named as
+//! on disk (IN and OUT unless renamed). The title line also carries `Open in
+//! Portal`, which opens the project's link on the Portal server. A watch the
+//! user made is still one row of its own, drawn exactly as it was.
 //!
 //! The pencil opens the **watch folder editor** (`.modal-box` over the list): the
 //! local folder — typed, or chosen from the folder panel — the Frame.io
@@ -72,42 +68,12 @@ pub const PORTAL_MARKER: &str = "Portal";
 /// lie about being final.
 pub const PORTAL_SENTENCE: &str = "Managed by Portal: remove it there";
 
-// The words the job a duplex is, and its lanes, are said in. This is the
-// screen's copy; the code behind it is `Lane`, `WatchRow::duplex_id` and
-// [`crate::model::watch_blocks`].
-
-/// The job one Portal-managed project is, after its destination label.
-pub const SMART_IN_OUT_TRAY: &str = "Smart In/Out Tray";
-/// The words that say what the job is, after the project's name on the title
-/// line: [`SMART_IN_OUT_TRAY`] behind the separator the title has always used,
-/// set in the row's own detail style — one step down from the name's body, and
-/// muted — so the project is what the row reads first. It used to be one run with
-/// the name, which made the tray read as loud as the project.
-pub const TRAY_SUFFIX: &str = "· Smart In/Out Tray";
 /// The job's way into Portal, on its title line beside Remove.
 pub const OPEN_IN_PORTAL: &str = "Open in Portal";
 /// Why [`OPEN_IN_PORTAL`] does nothing: the address it opens is a setting, and an
 /// empty one is how Portal is switched off. The link says this on hover rather
 /// than vanishing, so the row always offers the same things.
 pub const PORTAL_ADDRESS_MISSING: &str = "set the Portal address in Settings";
-/// The inbound lane, its tray in brackets: the download watch on the client's
-/// folder.
-pub const LANE_INBOUND: &str = "Inbound (In Tray)";
-/// The outbound lane, its tray in brackets: the upload watch on the exports
-/// folder.
-pub const LANE_OUTBOUND: &str = "Outbound (Out Tray)";
-/// What a lane with no watch behind it says, after its label and an em dash.
-pub const LANE_NOT_CONFIGURED: &str = "not configured";
-
-/// A lane's own words on screen.
-fn lane_label(lane: Lane) -> &'static str {
-    match lane {
-        Lane::Inbound => LANE_INBOUND,
-        Lane::Outbound => LANE_OUTBOUND,
-        Lane::None => "",
-    }
-}
-
 /// What the screen asks the shell to do.
 ///
 /// A view is a pure renderer over [`UiState`], so everything that needs the
@@ -443,16 +409,14 @@ fn duplex_block(
     job_head(ui, &label, link_url.as_deref(), rows, columns, action);
 
     for lane in [Lane::Inbound, Lane::Outbound] {
-        match rows.iter().copied().find(|&index| watches[index].lane == lane) {
-            Some(index) => sync_lane_row(ui, index, &mut watches[index], home, columns, action),
-            None => missing_lane(ui, lane, columns),
+        if let Some(index) = rows.iter().copied().find(|&index| watches[index].lane == lane) {
+            sync_lane_row(ui, index, &mut watches[index], home, columns, action);
         }
     }
 }
 
-/// The job's title line: the project's name, then [`TRAY_SUFFIX`] beside it in
-/// the row's detail style, and at the right the job's own actions — `Open in
-/// Portal`, and the one Remove that takes both lanes.
+/// The job's title line: the project's name, and at the right the job's own
+/// actions — `Open in Portal`, and the one Remove that takes both lanes.
 ///
 /// `link_url` is the Portal page the job's link is on; `None` is a Portal address
 /// not set, which is why `Open in Portal` is drawn off there rather than left
@@ -471,20 +435,12 @@ fn job_head(
             icon_tile(ui, Glyph::Folder);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
-                // One line, two runs: the project at the row's own weight, and
-                // the words that say what the job is one step down and muted, so
-                // the project is what reads first.
                 title_line(ui, |ui| {
                     ui.add(theme::truncating(
                         RichText::new(label)
                             .font(theme::body())
                             .color(theme::TEXT)
                             .strong(),
-                    ));
-                    ui.add(theme::truncating(
-                        RichText::new(TRAY_SUFFIX)
-                            .font(theme::detail())
-                            .color(theme::TEXT_3),
                     ));
                 });
                 // The second line is the marker a Portal row already carries, in
@@ -522,9 +478,8 @@ fn job_head(
     head.on_hover_text(PORTAL_SENTENCE);
 }
 
-/// One sync lane of a job: the lane's words, its folder and path, the Frame.io
-/// side, and the lane's own state — the same cells a row draws, in the same
-/// fonts and the same 56 px row.
+/// One folder of a job: its name and path, the Frame.io side, and its own
+/// state — the same cells a row draws, in the same fonts and the same 56 px row.
 fn sync_lane_row(
     ui: &mut egui::Ui,
     index: usize,
@@ -533,7 +488,7 @@ fn sync_lane_row(
     columns: &Columns,
     action: &mut Option<Action>,
 ) {
-    let lane = lane_label(watch.lane).to_string();
+    let lane = base_name(&watch.local);
     let path = short_path(&watch.local, home);
 
     strip(ui, ROW_HEIGHT, true, |ui| {
@@ -556,25 +511,6 @@ fn sync_lane_row(
         middle_cells(ui, watch, columns);
         // The lane keeps every action but Remove: one Remove, on the job.
         actions_cell(ui, columns, index, watch, None, action);
-    });
-}
-
-/// The lane a job does not have: its words, then what is missing — `Outbound
-/// (Out Tray) — not configured`.
-fn missing_lane(ui: &mut egui::Ui, lane: Lane, columns: &Columns) {
-    let text = format!("{} — {LANE_NOT_CONFIGURED}", lane_label(lane));
-
-    strip(ui, ROW_HEIGHT, false, |ui| {
-        cell(ui, columns.name, ROW_HEIGHT, false, |ui| {
-            ui.add_space(theme::size::KIND_ICON + theme::space::XL);
-            ui.add(theme::truncating(
-                RichText::new(&text)
-                    .font(theme::body())
-                    .color(theme::TEXT_3),
-            ));
-        });
-        empty_cells(ui, columns);
-        cell(ui, columns.actions, ROW_HEIGHT, false, |_ui| {});
     });
 }
 
@@ -1161,13 +1097,11 @@ fn glyph(ui: &mut egui::Ui, glyph: Glyph, colour: Color32) {
     paint(ui.painter(), rect, glyph, colour, 14.0);
 }
 
-/// The job's title line: the project's name and [`TRAY_SUFFIX`] side by side,
-/// at the body font's own height.
+/// The job's title line: the project's name, at the body font's own height.
 ///
 /// A plain `ui.horizontal` assumes there is something interactive on the line
 /// and sizes itself from `interact_size`, which would push the marker under it
-/// down the row. This is [`detail_line`] one font step up: the line the job's
-/// name has always been given, with the tray's words on it.
+/// down the row. This is [`detail_line`] one font step up.
 fn title_line(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     let line = vec2(
         ui.available_width(),
@@ -1525,8 +1459,8 @@ mod tests {
     /// exports folder uploaded from, and one destination label between them.
     fn luc() -> Vec<WatchRow> {
         vec![
-            lane_watch("/Users/chaos/Live_Work/LUC/1_DRIVE", "LUC", "download", true, 4, "LUC", Lane::Inbound),
-            lane_watch("/Users/chaos/Live_Work/LUC/0_EXPORTS", "LUC", "upload", true, 2, "LUC", Lane::Outbound),
+            lane_watch("/Users/chaos/Portal/LUC/IN", "LUC", "download", true, 4, "LUC", Lane::Inbound),
+            lane_watch("/Users/chaos/Portal/LUC/OUT", "LUC", "upload", true, 2, "LUC", Lane::Outbound),
         ]
     }
 
@@ -1552,21 +1486,15 @@ mod tests {
             )
     }
 
-    /// The job's title line on screen: the project's name, and the tray suffix
-    /// beside it.
+    /// The job's title line on screen: the project's name.
     ///
     /// The name is not unique — the Frame.io column prints the same words on
-    /// every lane — so it is the one that shares the suffix's line.
-    fn job_title<'h>(
-        harness: &'h Harness<'_, UiState>,
-        name: &'h str,
-    ) -> (egui_kittest::Node<'h>, egui_kittest::Node<'h>) {
-        let suffix = harness.get_by_label(TRAY_SUFFIX);
-        let title = harness
+    /// every lane — so it is the topmost one: the title sits above its lanes.
+    fn job_title<'h>(harness: &'h Harness<'_, UiState>, name: &'h str) -> egui_kittest::Node<'h> {
+        harness
             .get_all_by_label(name)
-            .find(|node| (node.rect().center().y - suffix.rect().center().y).abs() < 2.0)
-            .unwrap_or_else(|| panic!("no `{name}` on the job's title line"));
-        (title, suffix)
+            .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+            .unwrap_or_else(|| panic!("no `{name}` on screen"))
     }
 
     #[test]
@@ -2272,20 +2200,15 @@ mod tests {
 
     // ---------- a duplex is one job with two sync lanes ----------
 
-    /// The title line the owner asked for, exactly: the project's name and then
-    /// `· Smart In/Out Tray`, and a line per lane under it with its tray in
-    /// brackets.
+    /// The project's name on the title line, and a line per folder under it,
+    /// named as the folder is on disk.
     #[test]
-    fn a_duplex_draws_one_job_with_both_lane_labels() {
+    fn a_duplex_draws_one_job_with_both_folders() {
         let harness = screen_harness(state_with(luc()));
 
-        // The job, in the owner's words: the project, then the tray.
-        let (title, _) = job_title(&harness, "LUC");
-        // Its two lanes, each with its own tray named.
-        let inbound = harness.get_by_label(LANE_INBOUND);
-        let outbound = harness.get_by_label(LANE_OUTBOUND);
-        assert_eq!(LANE_INBOUND, "Inbound (In Tray)");
-        assert_eq!(LANE_OUTBOUND, "Outbound (Out Tray)");
+        let title = job_title(&harness, "LUC");
+        let inbound = harness.get_by_label("IN");
+        let outbound = harness.get_by_label("OUT");
 
         // Under the title, inbound first, one row apart, the rows on the pitch
         // the list has always used.
@@ -2300,8 +2223,9 @@ mod tests {
 
         // Each lane carries its folder's path, the Frame.io side, its own count
         // and its own state.
-        harness.get_by_label("~/Live_Work/LUC/1_DRIVE");
-        harness.get_by_label("~/Live_Work/LUC/0_EXPORTS");
+        harness.get_by_label("~/Portal/LUC/IN");
+        harness.get_by_label("~/Portal/LUC/OUT");
+        assert!(harness.query_by_label("· Smart In/Out Tray").is_none(), "no workflow's words");
         // `LUC` three times: the title line's name, and the Frame.io side on
         // each of the two lanes.
         assert_eq!(harness.get_all_by_label("LUC").count(), 3, "the title, and both lanes");
@@ -2314,19 +2238,14 @@ mod tests {
         assert_eq!(harness.get_all_by_label("Pause").count(), 2);
         assert_eq!(harness.get_all_by_label("Edit").count(), 2);
         assert_eq!(harness.get_all_by_label("Show in Finder").count(), 2);
-
-        // The two watches are not two rows of their own: no folder name is
-        // printed, because the job is what is listed.
-        assert!(harness.query_by_label("1_DRIVE").is_none());
-        assert!(harness.query_by_label("0_EXPORTS").is_none());
     }
 
-    /// A link with a sync rule but no exports folder: one lane, and a line that
-    /// says which one is missing, in the owner's words.
+    /// A link with no upload folder: its IN folder and nothing else. A link
+    /// without one is the normal case, not something missing.
     #[test]
-    fn a_duplex_with_one_lane_says_which_is_not_configured() {
+    fn a_project_with_only_in_shows_only_in() {
         let harness = screen_harness(state_with(vec![lane_watch(
-            "/Users/chaos/Live_Work/LUC/1_DRIVE",
+            "/Users/chaos/Portal/LUC/IN",
             "LUC",
             "download",
             true,
@@ -2335,39 +2254,19 @@ mod tests {
             Lane::Inbound,
         )]));
 
-        job_title(&harness, "LUC");
-        harness.get_by_label(LANE_INBOUND);
-        // The lane that is not there, and the plain statement of it.
-        assert!(
-            harness.query_by_label(LANE_OUTBOUND).is_none(),
-            "the missing lane has no row of its own"
-        );
-        let absent = format!("{LANE_OUTBOUND} — {LANE_NOT_CONFIGURED}");
-        let missing = harness.get_by_label(&absent);
-        // One row under the lane that exists: a row's first line sits on the
-        // same pitch the list has always used, and this line — alone in its row,
-        // with no path under it — is centred in its row rather than on that first
-        // line, so it reads a little lower than a lane's own words.
-        let inbound = harness.get_by_label(LANE_INBOUND);
-        let step = missing.rect().center().y - inbound.rect().center().y;
-        assert!(
-            step > ROW_HEIGHT && step < ROW_HEIGHT * 2.0,
-            "the missing lane is the lane's next row, {step} px on: {:?} {:?}",
-            missing.rect(),
-            inbound.rect()
-        );
-        // A job with one lane still has one Remove, and one of every other
-        // action.
+        let title = job_title(&harness, "LUC");
+        let inbound = harness.get_by_label("IN");
+        assert!(harness.query_by_label("OUT").is_none());
+        assert!((inbound.rect().center().y - title.rect().center().y - ROW_HEIGHT).abs() < 2.0);
         assert_eq!(harness.get_all_by_label("Remove").count(), 1);
         assert_eq!(harness.get_all_by_label("Pause").count(), 1);
     }
 
-    /// The same, the other way round: the exports folder configured, the client's
-    /// folder not. The line names the lane that is missing, not a fixed one.
+    /// The same the other way round: only the upload folder is watched.
     #[test]
-    fn an_outbound_only_duplex_names_the_inbound_lane_as_missing() {
+    fn a_project_with_only_out_shows_only_out() {
         let harness = screen_harness(state_with(vec![lane_watch(
-            "/Users/chaos/Live_Work/LUC/0_EXPORTS",
+            "/Users/chaos/Portal/LUC/OUT",
             "LUC",
             "upload",
             false,
@@ -2376,10 +2275,9 @@ mod tests {
             Lane::Outbound,
         )]));
 
-        harness.get_by_label(LANE_OUTBOUND);
-        harness.get_by_label(&format!("{LANE_INBOUND} — {LANE_NOT_CONFIGURED}"));
+        harness.get_by_label("OUT");
         harness.get_by_label("Paused");
-        assert!(harness.query_by_label(LANE_INBOUND).is_none());
+        assert!(harness.query_by_label("IN").is_none());
     }
 
     /// A watch the user made keeps the row it has always had: no title, no lane
@@ -2389,8 +2287,8 @@ mod tests {
     fn a_user_watch_keeps_its_own_row_beside_a_job() {
         let harness = screen_harness(state_with(vec![
             watch("/Users/chaos/Movies/Rushes", "Rushes 2026", "upload", true, 3),
-            lane_watch("/Users/chaos/Live_Work/LUC/1_DRIVE", "LUC", "download", true, 4, "LUC", Lane::Inbound),
-            lane_watch("/Users/chaos/Live_Work/LUC/0_EXPORTS", "LUC", "upload", true, 2, "LUC", Lane::Outbound),
+            lane_watch("/Users/chaos/Portal/LUC/IN", "LUC", "download", true, 4, "LUC", Lane::Inbound),
+            lane_watch("/Users/chaos/Portal/LUC/OUT", "LUC", "upload", true, 2, "LUC", Lane::Outbound),
         ]));
 
         // The user's row, exactly as before: the folder's name, its path, its
@@ -2403,7 +2301,7 @@ mod tests {
         // Its row is one row, and the job follows it on the same pitch: the
         // folder's name and the job's title are both a row's first line.
         let rushes = harness.get_by_label("Rushes").rect();
-        let title = job_title(&harness, "LUC").1.rect();
+        let title = job_title(&harness, "LUC").rect();
         assert!(
             (title.center().y - rushes.center().y - ROW_HEIGHT).abs() < 1.0,
             "{rushes:?} {title:?}"
@@ -2418,23 +2316,23 @@ mod tests {
     #[test]
     fn two_duplexes_make_two_blocks_in_label_order() {
         let harness = screen_harness(state_with(vec![
-            lane_watch("/Users/chaos/Live_Work/LUC/1_DRIVE", "LUC", "download", true, 0, "LUC", Lane::Inbound),
-            lane_watch("/Users/chaos/Live_Work/ARCH/0_EXPORTS", "Archive", "upload", true, 0, "ARCH", Lane::Outbound),
-            lane_watch("/Users/chaos/Live_Work/LUC/0_EXPORTS", "LUC", "upload", true, 0, "LUC", Lane::Outbound),
-            lane_watch("/Users/chaos/Live_Work/ARCH/1_DRIVE", "Archive", "download", true, 0, "ARCH", Lane::Inbound),
+            lane_watch("/Users/chaos/Portal/LUC/IN", "LUC", "download", true, 0, "LUC", Lane::Inbound),
+            lane_watch("/Users/chaos/Portal/ARCH/OUT", "Archive", "upload", true, 0, "ARCH", Lane::Outbound),
+            lane_watch("/Users/chaos/Portal/LUC/OUT", "LUC", "upload", true, 0, "LUC", Lane::Outbound),
+            lane_watch("/Users/chaos/Portal/ARCH/IN", "Archive", "download", true, 0, "ARCH", Lane::Inbound),
         ]));
 
         // Each job's title line, in the order the blocks are drawn.
-        let titles: Vec<_> = harness.get_all_by_label(TRAY_SUFFIX).map(|n| n.rect()).collect();
-        assert_eq!(titles.len(), 2, "two jobs, two title lines");
-        let (archive, luc) = (titles[0], titles[1]);
+        let archive = job_title(&harness, "Archive").rect();
+        let luc = job_title(&harness, "LUC").rect();
         assert!(archive.top() < luc.top(), "Archive first: {archive:?} {luc:?}");
 
         // Each block holds its own two lanes, in its own place: four lanes, two
         // titles, and the lanes of one job under that job's title.
-        assert_eq!(harness.get_all_by_label(LANE_INBOUND).count(), 2);
-        assert_eq!(harness.get_all_by_label(LANE_OUTBOUND).count(), 2);
-        let inbound: Vec<_> = harness.get_all_by_label(LANE_INBOUND).map(|r| r.rect()).collect();
+        assert_eq!(harness.get_all_by_label("IN").count(), 2);
+        assert_eq!(harness.get_all_by_label("OUT").count(), 2);
+        let mut inbound: Vec<_> = harness.get_all_by_label("IN").map(|r| r.rect()).collect();
+        inbound.sort_by(|a, b| a.top().total_cmp(&b.top()));
         assert!(inbound[0].top() < inbound[1].top());
         assert!(
             (inbound[0].center().y - archive.center().y - ROW_HEIGHT).abs() < 1.0,
@@ -2456,8 +2354,8 @@ mod tests {
         assert_eq!(
             harness.state().requests,
             vec![
-                Request::RemoveWatch("id:/Users/chaos/Live_Work/LUC/1_DRIVE".to_string()),
-                Request::RemoveWatch("id:/Users/chaos/Live_Work/LUC/0_EXPORTS".to_string()),
+                Request::RemoveWatch("id:/Users/chaos/Portal/LUC/IN".to_string()),
+                Request::RemoveWatch("id:/Users/chaos/Portal/LUC/OUT".to_string()),
             ],
             "requests: {:?}",
             harness.state().requests
@@ -2470,7 +2368,7 @@ mod tests {
         harness.run();
         assert!(
             harness.state().requests.contains(&Request::SetWatchEnabled {
-                id: "id:/Users/chaos/Live_Work/LUC/0_EXPORTS".to_string(),
+                id: "id:/Users/chaos/Portal/LUC/OUT".to_string(),
                 on: false,
             }),
             "requests: {:?}",
@@ -2509,50 +2407,16 @@ mod tests {
         );
     }
 
-    // ---------- the title line's two runs, and the job's way into Portal ----------
+    // ---------- the title line, and the job's way into Portal ----------
 
-    /// The name and the tray are two runs on one line, in two styles: the
-    /// project's at the row's own weight, and `· Smart In/Out Tray` in the detail
-    /// style the row already sets `Portal` and its paths in — one step down, and
-    /// muted — so the project reads as the name and the tray as what the job is.
+    /// The title is the project's name and nothing else, a line of the body font.
     #[test]
-    fn the_jobs_title_sets_the_project_first_and_the_tray_one_step_down() {
+    fn the_jobs_title_is_the_project_alone() {
         let harness = screen_harness(state_with(luc()));
-        let (name, suffix) = job_title(&harness, "LUC");
-
-        // The words, unchanged: `· ` and the tray's own name.
-        assert_eq!(TRAY_SUFFIX, format!("· {SMART_IN_OUT_TRAY}"));
-
-        // One line, the tray after the name rather than under it.
-        assert!(
-            (suffix.rect().center().y - name.rect().center().y).abs() < 2.0,
-            "one line: {:?} {:?}",
-            name.rect(),
-            suffix.rect()
-        );
-        assert!(
-            suffix.rect().left() >= name.rect().right(),
-            "the tray's words come after the project's: {:?} {:?}",
-            name.rect(),
-            suffix.rect()
-        );
-
-        // Two styles, each the font it is set in: the name is a line of the body
-        // font and the suffix a line of the detail font, so the suffix is the
-        // smaller of the two by exactly the step the row's paths already take.
+        let name = job_title(&harness, "LUC");
         let body = harness.ctx.fonts_mut(|fonts| fonts.row_height(&theme::body()));
-        let detail = harness.ctx.fonts_mut(|fonts| fonts.row_height(&theme::detail()));
-        assert!(
-            (name.rect().height() - body).abs() < 0.5,
-            "the name is a body line: {:?}, {body} px",
-            name.rect()
-        );
-        assert!(
-            (suffix.rect().height() - detail).abs() < 0.5,
-            "the tray is a detail line: {:?}, {detail} px",
-            suffix.rect()
-        );
-        assert!(detail < body, "the detail step is the smaller one");
+        assert!((name.rect().height() - body).abs() < 0.5, "the name is a body line: {:?}, {body} px", name.rect());
+        assert!(harness.query_by_label("· Smart In/Out Tray").is_none());
     }
 
     /// `Open in Portal` opens the page the job's link is on: the server from
@@ -2653,8 +2517,8 @@ mod tests {
         harness.state_mut().settings.portal_url = "https://portal.nightfall.tv".to_string();
         harness.run_steps(2);
         job_title(&harness, "LUC");
-        harness.get_by_label(LANE_INBOUND);
-        harness.get_by_label(LANE_OUTBOUND);
+        harness.get_by_label("IN");
+        harness.get_by_label("OUT");
         harness.snapshot("watch_duplex");
     }
 

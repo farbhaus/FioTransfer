@@ -180,7 +180,7 @@ pub fn fixture_state(view: View) -> UiState {
             last_folder_label: "Shows / Nightfall / Ep 04 / Renders".into(),
             // Portal: set up and on, so the section has something to show.
             portal_url: "https://portal.nightfall.tv".into(),
-            portal_root: "/Users/dana/Live_Work".into(),
+            portal_root: "/Users/dana/Portal".into(),
             portal_enabled: true,
             portal_every_secs: 30,
             ..Settings::default()
@@ -192,7 +192,7 @@ pub fn fixture_state(view: View) -> UiState {
                 needs_code: false,
                 email: String::new(),
                 url: "https://portal.nightfall.tv".into(),
-                root: "/Users/dana/Live_Work".into(),
+                root: "/Users/dana/Portal".into(),
                 running: false,
                 last_at: FIXTURE_NOW_MS - FIXTURE_PORTAL_AGO_MS,
                 links_seen: 4,

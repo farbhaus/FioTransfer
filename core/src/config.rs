@@ -51,10 +51,18 @@ pub struct Settings {
     /// Portal's base URL, e.g. https://portal.example.com. Empty: not set up.
     #[serde(default)]
     pub portal_url: String,
-    /// Where the project folders live on this Mac. The folder name comes from
-    /// the link's turbosort marker; Portal's own destination paths are not used.
+    /// Where the project folders live on this Mac, one per synced link.
+    /// Portal's own destination paths are not used.
     #[serde(default = "default_portal_root")]
     pub portal_root: String,
+    /// The folder in each project that the link's uploads come down into, when
+    /// Portal doesn't name it.
+    #[serde(default = "default_portal_in_folder")]
+    pub portal_in_folder: String,
+    /// The folder in each project whose files go back up, when Portal doesn't
+    /// name it.
+    #[serde(default = "default_portal_out_folder")]
+    pub portal_out_folder: String,
     /// Reconcile watch folders from Portal in the background (off by default).
     #[serde(default)]
     pub portal_enabled: bool,
@@ -72,8 +80,11 @@ pub struct Settings {
     pub portal_email: String,
 }
 
-/// Default for `Settings::portal_root`: ~/Live_Work.
-pub const PORTAL_ROOT_DIR: &str = "Live_Work";
+/// Default for `Settings::portal_root`: ~/Portal.
+pub const PORTAL_ROOT_DIR: &str = "Portal";
+/// Defaults for `Settings::portal_in_folder` / `portal_out_folder`.
+pub const PORTAL_IN_FOLDER: &str = "IN";
+pub const PORTAL_OUT_FOLDER: &str = "OUT";
 /// Default for `Settings::portal_every_secs`.
 pub const PORTAL_EVERY_SECS: i64 = 30;
 /// The shortest interval a poller may be asked for.
@@ -98,6 +109,8 @@ impl Default for Settings {
             last_folder_path: Vec::new(),
             portal_url: String::new(),
             portal_root: default_portal_root(),
+            portal_in_folder: default_portal_in_folder(),
+            portal_out_folder: default_portal_out_folder(),
             portal_enabled: false,
             portal_on_change: PORTAL_ON_CHANGE.to_string(),
             portal_every_secs: PORTAL_EVERY_SECS,
@@ -112,7 +125,7 @@ impl Settings {
     }
 
     /// The local root Portal's project folders are mirrored under, with a
-    /// leading `~` expanded: `~/Live_Work` by default.
+    /// leading `~` expanded: `~/Portal` by default.
     pub fn portal_root_path(&self) -> PathBuf {
         let root = if self.portal_root.trim().is_empty() { default_portal_root() } else { self.portal_root.clone() };
         expand_home(root.trim())
@@ -167,6 +180,14 @@ impl Settings {
         if self.portal_root.trim().is_empty() || self.portal_root.trim() == "/" {
             self.portal_root = d.portal_root;
         }
+        self.portal_in_folder = self.portal_in_folder.trim().to_string();
+        if self.portal_in_folder.is_empty() {
+            self.portal_in_folder = d.portal_in_folder;
+        }
+        self.portal_out_folder = self.portal_out_folder.trim().to_string();
+        if self.portal_out_folder.is_empty() {
+            self.portal_out_folder = d.portal_out_folder;
+        }
         if self.portal_on_change != crate::history::watch::ON_CHANGE_KEEP {
             self.portal_on_change = PORTAL_ON_CHANGE.to_string();
         }
@@ -196,7 +217,15 @@ fn default_portal_every() -> i64 {
     PORTAL_EVERY_SECS
 }
 
-/// ~/Live_Work, the folder Portal's markers point into.
+fn default_portal_in_folder() -> String {
+    PORTAL_IN_FOLDER.to_string()
+}
+
+fn default_portal_out_folder() -> String {
+    PORTAL_OUT_FOLDER.to_string()
+}
+
+/// ~/Portal, where the synced links' folders go.
 pub fn default_portal_root() -> String {
     home_dir().join(PORTAL_ROOT_DIR).to_string_lossy().into_owned()
 }

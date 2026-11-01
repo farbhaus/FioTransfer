@@ -862,7 +862,7 @@ fn an_invalid_local_refuses_the_mapping_and_creates_nothing() {
     )]);
     let rep = w.reconcile();
     assert!(rep.error.is_empty(), "{}", rep.error);
-    assert!(rep.skipped.iter().any(|s| s.reason.contains("sync drive folder")), "{:?}", rep.skipped);
+    assert!(rep.skipped.iter().any(|s| s.reason.contains("the download folder")), "{:?}", rep.skipped);
     // The exports side is still made: one bad mapping does not lose the other.
     assert_eq!(w.portal_watches().len(), 1);
     assert_eq!(w.portal_watches()[0].direction, "upload");
@@ -879,6 +879,40 @@ fn an_invalid_local_refuses_the_mapping_and_creates_nothing() {
     assert_eq!(made, want, "the refused name made no folder");
 }
 
+/// A link ticked "Sync to FioTransfer" and nothing else (`"sync": {}`, no
+/// turbosort) is a folder named after the link with IN inside; a link that is
+/// not ticked is left alone. Renaming IN in the settings moves the watch to the
+/// new folder on the next run, and the old folder stays on disk.
+#[test]
+fn a_ticked_link_is_named_after_itself_and_the_users_names_apply() {
+    let w = World::new();
+    let mut ticked = sync_row("L1", "", json!({}));
+    ticked["name"] = json!("Acme Spot 30s");
+    w.stub.links(vec![ticked, sync_row("L2", "", json!(null))]);
+    let rep = w.reconcile();
+    assert!(rep.error.is_empty() && rep.skipped.is_empty(), "{:?} {:?}", rep.error, rep.skipped);
+    let ws = w.portal_watches();
+    assert_eq!(ws.len(), 1, "only the ticked link: {:?}", ws);
+    let project = w.root.join("Acme Spot 30s");
+    assert_eq!(ws[0].local_path, project.join("IN").to_string_lossy().into_owned());
+    assert_eq!(ws[0].direction, "download");
+    assert_eq!(ws[0].folder_id, "F1", "the link's own folder");
+    assert!(!ws[0].ignore_remote, "IN takes what the client sent before the folder existed");
+
+    // The app's settings live on disk, as they do in the app.
+    let root = w.root.to_string_lossy().into_owned();
+    w.app.set_portal(&w.stub.base, "", &root, true).expect("settings saved");
+    w.app.set_portal_folders("Footage", "Exports").expect("the names are saved");
+    let rep = w.reconcile();
+    assert!(rep.error.is_empty(), "{}", rep.error);
+    let ws = w.portal_watches();
+    assert_eq!(ws.len(), 1);
+    assert_eq!(ws[0].local_path, project.join("Footage").to_string_lossy().into_owned());
+    assert!(project.join("IN").is_dir(), "the old folder stays");
+    assert!(w.app.set_portal_folders("Same", "Same").is_err(), "IN and OUT differ");
+    assert!(w.app.set_portal_folders("a/b", "OUT").is_err(), "one segment each");
+}
+
 #[test]
 fn both_locals_the_same_refuses_the_second_mapping() {
     let w = World::new();
@@ -891,7 +925,7 @@ fn both_locals_the_same_refuses_the_second_mapping() {
     assert!(rep.error.is_empty(), "{}", rep.error);
     assert_eq!(w.portal_watches().len(), 1, "one folder cannot be both one-way");
     assert_eq!(w.portal_watches()[0].direction, "download", "the drive side is the one that was made");
-    assert!(rep.skipped.iter().any(|s| s.reason.contains("is the drive folder")), "{:?}", rep.skipped);
+    assert!(rep.skipped.iter().any(|s| s.reason.contains("is the download folder")), "{:?}", rep.skipped);
 }
 
 #[test]
@@ -1311,5 +1345,6 @@ fn a_new_settings_file_without_the_portal_fields_still_loads() {
     assert!(!s.portal_enabled);
     assert_eq!(s.portal_on_change, "overwrite");
     assert_eq!(s.portal_every_secs, 30);
-    assert!(s.portal_root.ends_with("Live_Work"));
+    assert!(s.portal_root.ends_with("Portal"));
+    assert_eq!((s.portal_in_folder.as_str(), s.portal_out_folder.as_str()), ("IN", "OUT"));
 }

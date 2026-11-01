@@ -504,6 +504,12 @@ impl Shell {
                 ui.settings.portal_root = root;
                 self.portal_write(ui, "");
             }
+            Request::SetPortalFolders { download, upload } => {
+                if let Err(err) = self.app.set_portal_folders(&download, &upload) {
+                    ui.push_toast(err, ToastKind::Err);
+                }
+                self.read_state(ui);
+            }
             Request::SetPortalEnabled(on) => {
                 ui.settings.portal_enabled = on;
                 self.portal_write(ui, "");

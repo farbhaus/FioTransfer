@@ -264,8 +264,8 @@ const PORTAL_USAGE: &str = "fio portal — the Portal connection, set up and che
                                        or a second line
   fio portal signout                   forget the stored session
   fio portal reconcile [--url URL] [--dry-run]
-                                       make the watch folders Portal's markers ask
-                                       for; --dry-run prints the plan and changes nothing
+                                       make a folder for each link synced to FioTransfer;
+                                       --dry-run prints the plan and changes nothing
   fio portal token <token> | --clear   store a bearer token instead (a deployment's
                                        PORTAL_API_TOKEN, or a passkey-only account)
 
@@ -709,7 +709,12 @@ async fn portal_reconcile_command(args: &[String]) -> ! {
     if !mine.is_empty() {
         println!("watch folders:");
         for w in mine {
-            println!("  {} ← {}/{}", w.local_path, w.account_id, w.folder_id);
+            let arrow = match w.direction.as_str() {
+                "upload" => "→",
+                "download" => "←",
+                _ => "↔",
+            };
+            println!("  {} {} {}/{}", w.local_path, arrow, w.account_id, w.folder_id);
         }
     }
     std::process::exit(0);
