@@ -1,0 +1,280 @@
+name: Build
+
+# Tests FioTransfer and packages it: the universal macOS app (scripts/package.sh)
+# and the same app for Linux (.deb, AppImage) and Windows (NSIS installer).
+# Pushes to main and pull requests only build. A v* tag publishes a release.
+#
+# The release keeps the Go releases' macOS asset names: FioTransfer-X.Y.Z.dmg,
+# FioTransfer-X.Y.Z-macOS.zip and SHA256SUMS.txt. The Go app's updater (v1.3.0
+# and older) and scripts/install.sh look for exactly those. The app's own
+# updater reads latest.json, which needs every artifact signed with the
+# CARGO_PACKAGER_SIGN_PRIVATE_KEY secret (docs/UPDATES.md); without it the
+# release still publishes, with no feed.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default; only the release job can write.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  APP: fiotransfer-egui
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: v
+        run: |
+          set -euo pipefail
+          CARGO=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+            # The release is checked against Cargo.toml so the two can't drift.
+            if [[ "$V" != "$CARGO" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $CARGO"
+              exit 1
+            fi
+          else
+            V="0.0.0-${GITHUB_SHA::7}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: version
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-packager@0.11.8
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Test
+        env:
+          FIO_NO_KEYCHAIN: "1"
+        run: |
+          cargo test --locked --workspace --exclude fiotransfer-egui
+          # The screen snapshots render through wgpu, which a runner may not have.
+          cargo test --locked -p fiotransfer-egui --lib --bins --test prop_space
+
+      # Optional Developer ID signing + notarization. Without these secrets the
+      # app is ad-hoc signed and Gatekeeper blocks its first launch.
+      # Step `if:` can't see a step's own env or `secrets`, so detect them here.
+      - name: Check for signing secrets
+        id: signing
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+        run: |
+          if [[ -n "$MACOS_CERT_P12" ]]; then echo "enabled=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Import signing certificate
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KC="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p ci "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p ci "$KC"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+
+      - name: Package
+        env:
+          MACOS_SIGN_IDENTITY: ${{ steps.signing.outputs.enabled == 'true' && secrets.MACOS_SIGN_IDENTITY || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: scripts/package.sh "$VERSION"
+
+      # The universal zip serves both Mac architectures in latest.json.
+      - name: Sign the zip for the updater
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          printf 'macos-aarch64\nmacos-x86_64\n' > dist/updater-target-macos.txt
+          if [ -z "${CARGO_PACKAGER_SIGN_PRIVATE_KEY:-}" ]; then
+            echo "::warning title=Not signed for the updater::CARGO_PACKAGER_SIGN_PRIVATE_KEY is not set"
+            exit 0
+          fi
+          cargo packager signer sign "dist/FioTransfer-$VERSION-macOS.zip"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos
+          path: dist/*
+          if-no-files-found: error
+
+  linux:
+    needs: version
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # linuxdeploy ships as an AppImage; without FUSE it has to unpack itself.
+      APPIMAGE_EXTRACT_AND_RUN: 1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-packager@0.11.8
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libwayland-dev libudev-dev libssl-dev \
+            fuse libfuse2 file
+      - name: Package
+        run: |
+          set -euo pipefail
+          FIO_VERSION="$VERSION" cargo packager -p "$APP" --formats deb,appimage
+          mkdir -p out
+          cp dist-egui/*.deb "out/FioTransfer-$VERSION-linux.deb"
+          cp dist-egui/*.AppImage "out/FioTransfer-$VERSION-linux.AppImage"
+          echo linux-x86_64 > out/updater-target-linux.txt
+      - name: Sign for the updater
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_PACKAGER_SIGN_PRIVATE_KEY:-}" ]; then
+            echo "::warning title=Not signed for the updater::CARGO_PACKAGER_SIGN_PRIVATE_KEY is not set"
+            exit 0
+          fi
+          for f in out/*.deb out/*.AppImage; do cargo packager signer sign "$f"; done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux
+          path: out/*
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: windows-2025
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-packager@0.11.8
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          FIO_VERSION="$VERSION" cargo packager -p "$APP" --formats nsis
+          mkdir -p out
+          cp dist-egui/*.exe "out/FioTransfer-$VERSION-windows-setup.exe"
+          echo windows-x86_64 > out/updater-target-windows.txt
+      - name: Sign for the updater
+        shell: bash
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_PACKAGER_SIGN_PRIVATE_KEY:-}" ]; then
+            echo "::warning title=Not signed for the updater::CARGO_PACKAGER_SIGN_PRIVATE_KEY is not set"
+            exit 0
+          fi
+          cargo packager signer sign "out/FioTransfer-$VERSION-windows-setup.exe"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, macos, linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # The first-launch notice, then what's new: the tag's message (git tag -a
+      # vX.Y.Z -F notes.md), or the commit subjects since the previous tag when
+      # the tag has none. Drop the notice once releases are notarized.
+      - name: Release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: scripts/release-notes.sh "$TAG" > release-notes.md
+
+      # Built from the signed assets themselves, so the feed can't name a file
+      # the release doesn't carry. No signatures, no feed.
+      - name: Updater feed (latest.json)
+        run: |
+          set -euo pipefail
+          if compgen -G "artifacts/*.sig" > /dev/null; then
+            python3 scripts/latest-json.py --dir artifacts --version "$VERSION" \
+              --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md --out artifacts/latest.json
+            cat artifacts/latest.json
+          else
+            echo "::warning title=No updater feed::nothing is signed (CARGO_PACKAGER_SIGN_PRIVATE_KEY is not set), so the Rust app won't see this release"
+          fi
+          rm -f artifacts/updater-target-*.txt
+
+      # One SHA256SUMS.txt for every asset; the Go app's updater reads the zip's line.
+      - name: Checksums
+        run: |
+          cd artifacts
+          rm -f SHA256SUMS.txt
+          sha256sum -- * > ../SHA256SUMS.txt
+          mv ../SHA256SUMS.txt .
+          cat SHA256SUMS.txt
+
+      # The generated notes (the "Full Changelog" link) go below the body.
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          body_path: release-notes.md
