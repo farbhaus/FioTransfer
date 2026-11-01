@@ -1,0 +1,117 @@
+[
+ {
+  "id": "M1",
+  "file": "strings.rs",
+  "desc": "cstr: interior-NUL replacement becomes 'X' instead of ' '",
+  "exit": 101,
+  "caught": true,
+  "failing_tests": [
+   "the_nul_replacement_is_pinned_exactly",
+   "cstr_turns_every_interior_nul_into_a_space"
+  ],
+  "first_panic": "assertion `left == right` failed"
+ },
+ {
+  "id": "M2",
+  "file": "platform.rs",
+  "desc": "local_time: day field off by one (tm_mday + 1)",
+  "exit": 101,
+  "caught": true,
+  "failing_tests": [
+   "the_pinned_zone_table_matches",
+   "the_extremes_are_answerable_and_bounded",
+   "every_hour_of_two_years_and_every_day_of_eight_centuries",
+   "local_time_never_panics_and_its_fields_round_trip"
+  ],
+  "first_panic": "assertion `left == right` failed: TZ=America/New_York local_time(0)"
+ },
+ {
+  "id": "M3",
+  "file": "platform.rs",
+  "desc": "is_writable: inverted (access() != 0)",
+  "exit": 101,
+  "caught": true,
+  "failing_tests": [
+   "the_corpus_is_total_and_pinned_where_it_is_known",
+   "is_writable_matches_the_write_it_names",
+   "is_writable_agrees_with_doing_the_write",
+   "is_writable_follows_the_owner_write_bit"
+  ],
+  "first_panic": "is_writable(\"\")"
+ },
+ {
+  "id": "M4",
+  "file": "platform.rs",
+  "desc": "local_time: month field without the +1 (tm_mon)",
+  "exit": 101,
+  "caught": true,
+  "failing_tests": [
+   "every_hour_of_two_years_and_every_day_of_eight_centuries",
+   "the_pinned_zone_table_matches",
+   "the_extremes_are_answerable_and_bounded",
+   "local_time_never_panics_and_its_fields_round_trip",
+   "local_time_advances_by_a_dst_quantum_per_hour"
+  ],
+  "first_panic": "assertion `left == right` failed"
+ },
+ {
+  "id": "M5",
+  "file": "platform.rs",
+  "desc": "local_time: hour field off by one (tm_hour + 1)",
+  "exit": 101,
+  "caught": true,
+  "failing_tests": [
+   "the_pinned_zone_table_matches",
+   "local_time_never_panics_and_its_fields_round_trip"
+  ],
+  "first_panic": "assertion `left == right` failed: TZ=America/New_York local_time(0)"
+ },
+ {
+  "id": "M6",
+  "file": "strings.rs",
+  "desc": "from_c_str: keeps only the first byte of the C string",
+  "exit": 101,
+  "caught": true,
+  "failing_tests": [
+   "from_c_str_is_the_lossy_prefix_of_its_buffer"
+  ],
+  "first_panic": "range end index 1 out of range for slice of length 0"
+ },
+ {
+  "id": "M7",
+  "file": "platform.rs",
+  "desc": "is_network_volume: inverted mount-flag test (MNT_LOCAL != 0)",
+  "exit": 101,
+  "caught": true,
+  "failing_tests": [
+   "the_corpus_is_total_and_pinned_where_it_is_known",
+   "the_network_volume_answer_is_false_for_a_local_volume_in_this_workspace",
+   "is_network_volume_matches_the_mounts_filesystem_type"
+  ],
+  "first_panic": "assertion `left == right` failed: is_network_volume(\".\") type Some(\"apfs\")"
+ },
+ {
+  "id": "M8",
+  "file": "dialogs.rs",
+  "desc": "take_string: forgets to give the C buffer back (leak)",
+  "exit": 101,
+  "caught": true,
+  "failing_tests": [
+   "take_string_of_an_empty_buffer",
+   "take_string_reads_and_frees_exactly_once"
+  ],
+  "first_panic": "assertion `left == right` failed"
+ },
+ {
+  "id": "M9",
+  "file": "strings.rs",
+  "desc": "cstr_or_empty: interior NUL becomes a space (i.e. behaves like cstr)",
+  "exit": 101,
+  "caught": true,
+  "failing_tests": [
+   "the_nul_replacement_is_pinned_exactly",
+   "cstr_or_empty_yields_empty_when_there_is_an_interior_nul"
+  ],
+  "first_panic": "assertion `left == right` failed"
+ }
+]

@@ -19,7 +19,7 @@ else
 	range=$tag
 	[ -n "$prev" ] && range="$prev..$tag"
 	notes=$(git log --no-merges --format='%H' "$range" | while read -r c; do
-		if git diff-tree --no-commit-id --name-only -r "$c" | grep -qvE '_test\.go$|^\.github/|^docs/'; then
+		if git diff-tree --no-commit-id --name-only -r "$c" | grep -qvE '^(tests|egui-ui/tests|sys/tests|bench|docs|\.github)/'; then
 			git log -1 --format='- %s' "$c"
 		fi
 	done)

@@ -1,0 +1,106 @@
+[package]
+name = "fiotransfer-egui"
+version = "1.6.1"
+edition = "2024"
+
+[lib]
+# `rlib` keeps the native binary and the tests linking against this crate.
+# `cdylib` is what wasm-bindgen consumes for the browser capture (`src/wasm.rs`,
+# `bench/wasm-shots.sh`) — a measurement apparatus, not a shipping target.
+name = "fiotransfer_egui"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+# The native binary is behind a feature so the browser build can leave it out:
+# Trunk runs a plain `cargo build --target wasm32-unknown-unknown`, which builds
+# every target of the package, and `main.rs` calls `eframe::run_native` (native
+# only). `default` keeps the native build exactly as it was.
+[features]
+default = ["native"]
+native = []
+
+[[bin]]
+name = "fiotransfer-egui"
+path = "src/main.rs"
+required-features = ["native"]
+
+[dependencies]
+# The real app: this front end drives `fiotransfer_core::App` now, so there is one
+# model, one engine and one set of strings. The core holds no webview code (no
+# wry, no tao, no Objective-C), which is why this dependency is possible at all.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+eframe = "0.33.3"
+egui = "0.33.3"
+
+# Rendering PNGs and the kittest harness are native-only: neither belongs in the
+# wasm build (egui_kittest pulls wgpu, `image` pulls its codec stack).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The engine, the Frame.io API and the platform seam. Native only: it is tokio,
+# rustls and rusqlite underneath, none of which build for wasm32 — the browser
+# capture is a renderer of the fixture and has no backend (see `src/wasm.rs`).
+fiotransfer-core = { path = "../core" }
+# The menu bar item, the download panel and Finder's services (AppKit, macOS).
+fiotransfer-sys = { path = "../sys" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+egui_kittest = { version = "0.33.3", features = ["wgpu", "snapshot"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+# Property tests for the Space delta (`tests/prop_space.rs`): the ring's
+# arithmetic and the confirm state machine. The crate is already in the lock as
+# the app's own dev-dependency, so this resolves offline.
+[dev-dependencies]
+proptest = "1.12.0"
+
+# The browser entry point, and nothing else: eframe re-exports
+# `wasm_bindgen`/`web_sys`, but not `wasm_bindgen_futures::spawn_local`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "HtmlCanvasElement",
+    "Location",
+    "Window",
+] }
+
+# Unsigned packaging of THE app — this is the only bundle the release workflow
+# builds, on all three platforms.
+#   cargo packager -p fiotransfer-egui                       (platform defaults)
+#   cargo packager -p fiotransfer-egui --formats deb,appimage
+[package.metadata.packager]
+product-name = "FioTransfer"
+# version is taken from [package] above.
+# The one app: the identifier the macOS bundle has carried since the Go version.
+identifier = "com.farbhaus.fiotransfer"
+out-dir = "../dist-egui"
+binaries-dir = "../target/release"
+icons = ["../build/icons/icon.icns", "../build/icons/icon_1024.png", "../build/icons/icon_512.png"]
+# BOTH binaries, because `docs/PORTAL.md` tells the reader to run `fio portal …`
+# and a documented command the package does not install is a packaging bug. The
+# CLI is the root package's `fio`; the GUI is this one. Both land in the same
+# `binaries-dir` (`../target/release`), so one build of each is enough.
+before-packaging-command = "cargo build --release -p fiotransfer --bin fio && cargo build --release -p fiotransfer-egui --bin fiotransfer-egui"
+resources = ["../LICENSE", "../THIRD_PARTY_NOTICES.txt"]
+
+# The GUI stays `main`: it names the bundle, the desktop entry, the AppImage and
+# the installer, so double-clicking the .app and the menu entry do not change.
+[[package.metadata.packager.binaries]]
+path = "fiotransfer-egui"
+main = true
+
+# `fio` rides along, not main. Per format, cargo-packager 0.11.8 places a
+# non-main binary as follows (read from its source, `src/package/*/mod.rs`):
+#   deb      -> usr/bin/fio, beside usr/bin/fiotransfer-egui   (/usr/bin on PATH)
+#   appimage -> usr/bin/fio inside the AppDir, beside the GUI
+#   app      -> FioTransfer.app/Contents/MacOS/fio
+#   nsis     -> $INSTDIR\fio.exe, beside FioTransfer.exe
+[[package.metadata.packager.binaries]]
+path = "fio"
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+
+[package.metadata.packager.linux]
+generate-desktop-entry = true

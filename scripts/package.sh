@@ -1,7 +1,12 @@
 #!/bin/bash
-# Build FioTransfer.app and package it as a .dmg and .zip in dist/.
+# Build a universal FioTransfer.app and package it in dist/ as
+# FioTransfer-<version>.dmg, FioTransfer-<version>-macOS.zip and SHA256SUMS.txt.
+# The same script CI uses.
 #
 #   scripts/package.sh [version]
+#
+# The zip keeps the Go releases' name: the Go app's updater (v1.3.0 and older)
+# and scripts/install.sh look for "-macOS.zip" and its line in SHA256SUMS.txt.
 #
 # Optional signing/notarization (all must be set to notarize):
 #   MACOS_SIGN_IDENTITY   "Developer ID Application: Name (TEAMID)"; ad-hoc signed if unset
@@ -10,24 +15,30 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="${1:-dev}"
-PLATFORM="${PLATFORM:-darwin/universal}"
-WAILS="$(command -v wails || echo "$HOME/go/bin/wails")"
-APP="build/bin/FioTransfer.app"
 NAME="FioTransfer-${VERSION}"
+APP="build/bin/FioTransfer.app"
+TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
 
-"$WAILS" build -platform "$PLATFORM" -clean -trimpath -ldflags "-s -w -X main.version=${VERSION}"
+export FIO_VERSION="$VERSION"
+export MACOSX_DEPLOYMENT_TARGET=13.0
+for t in "${TARGETS[@]}"; do
+  cargo build --release --locked --target "$t" -p fiotransfer-egui --bin fiotransfer-egui
+  cargo build --release --locked --target "$t" -p fiotransfer --bin fio
+done
+OUT=target/universal-apple-darwin/release
+mkdir -p "$OUT"
+for b in fiotransfer-egui fio; do
+  lipo -create -output "$OUT/$b" "target/${TARGETS[0]}/release/$b" "target/${TARGETS[1]}/release/$b"
+done
 
-PLIST="$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION#v}" "$PLIST"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION#v}" "$PLIST"
-
-# The third-party licenses must ship with the app; they're generated from what
-# this build compiled in, so a dependency change can't leave them stale.
-cp LICENSE "$APP/Contents/Resources/LICENSE.txt"
-scripts/notices.sh > "$APP/Contents/Resources/THIRD_PARTY_NOTICES.txt"
-if ! cmp -s "$APP/Contents/Resources/THIRD_PARTY_NOTICES.txt" THIRD_PARTY_NOTICES.txt; then
-  echo "::warning::THIRD_PARTY_NOTICES.txt is out of date; run scripts/notices.sh > THIRD_PARTY_NOTICES.txt"
+# The bundle ships THIRD_PARTY_NOTICES.txt; it has to list what this build
+# compiled in.
+if ! python3 scripts/notices.py --check; then
+  echo "::warning::THIRD_PARTY_NOTICES.txt is out of date; run scripts/notices.py > THIRD_PARTY_NOTICES.txt"
 fi
+
+mkdir -p build/bin
+BIN="$OUT/fiotransfer-egui" CLI="$OUT/fio" APP="$APP" VERSION="$VERSION" NO_SIGN=1 scripts/bundle.sh
 
 NOTARIZE=false
 if [[ -n "${MACOS_SIGN_IDENTITY:-}" && -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_PASSWORD:-}" ]]; then

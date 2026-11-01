@@ -1,0 +1,60 @@
+[workspace]
+members = ["core", "egui-ui", "sys"]
+resolver = "2"
+
+[package]
+name = "fiotransfer"
+version = "1.6.1"
+edition = "2021"
+description = "FioTransfer's command line and benchmarks, over fiotransfer-core"
+
+[lib]
+name = "fiotransfer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fio"
+path = "src/bin/fio.rs"
+
+[[bin]]
+name = "fio-bench"
+path = "src/bin/bench.rs"
+
+# The app itself is `egui-ui` (`fiotransfer-egui`); this package ships no window
+# and no bundle. See `[package.metadata.packager]` there for the one entry the
+# release workflow packages.
+[dependencies]
+fiotransfer-core = { path = "core" }
+fiotransfer-sys = { path = "sys" }
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+reqwest = { version = "0.13.5", default-features = true, features = ["json", "stream"] }
+bytes = "1.12.1"
+url = "2.5.8"
+sha2 = "0.11.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+futures = "0.3.34"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[dev-dependencies]
+proptest = "1.12.0"
+# Only a test names an errno (login.rs); everything else that touches libc
+# goes through `fiotransfer-sys`.
+libc = "0.2"
+tempfile = "3.27.0"
+# The window `tests/portal_e2e.rs` presses: the app crate itself, and the two
+# crates `egui-ui/Cargo.toml` already tests with. Not a new harness — the same
+# `egui` / `egui_kittest` pair `egui-ui/tests/snapshots.rs` draws with. They are
+# here rather than in `egui-ui` because only this package may move `HOME`
+# (`std::env::set_var` is `unsafe` in edition 2024, which `egui-ui` forbids);
+# see the head of that test for the whole reason.
+egui = "0.33.3"
+egui_kittest = "0.33.3"
+fiotransfer-egui = { path = "egui-ui" }
