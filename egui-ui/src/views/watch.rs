@@ -28,7 +28,7 @@
 //! the page head; the tokens come from [`crate::theme`].
 
 use crate::model::{
-    watch_blocks, Lane, Request, UiState, WatchEditor, WatchRow, DIRECTION_DOWNLOAD,
+    fit_crumbs, watch_blocks, DestMode, Lane, Request, UiState, WatchEditor, WatchRow, DIRECTION_DOWNLOAD,
     DIRECTION_MIRROR, DIRECTION_UPLOAD, ON_CHANGE_KEEP, ON_CHANGE_OVERWRITE,
 };
 use crate::theme;
@@ -124,6 +124,8 @@ pub enum Action {
     Edit(usize),
     /// The editor's "Choose…": a folder panel for the local folder.
     ChooseFolder,
+    /// The editor's Frame.io folder: the destination picker.
+    ChooseDestination,
     /// The editor's Save: one watch's fields, as they were left in the dialog.
     /// [`ask`] turns it into `UpdateWatch` or `AddWatch`.
     SaveWatch(WatchEditor),
@@ -199,6 +201,7 @@ fn ask(state: &mut UiState, action: Action) {
             state.watch_editor = Some(editor);
         }
         Action::ChooseFolder => state.ask(Request::PickWatchFolder),
+        Action::ChooseDestination => state.ask(Request::OpenDest { mode: DestMode::Watch, at: None }),
         // Save is the only thing that asks the app for anything; the dialog is
         // closed first, so a refusal is a toast over the list rather than over a
         // form the user can no longer fix.
@@ -693,8 +696,11 @@ pub const EDITOR_CANCEL: &str = "Cancel";
 pub const EDITOR_CLOSE: &str = "Close";
 pub const EDITOR_CHOOSE: &str = "Choose…";
 pub const EDITOR_LABEL_FOLDER: &str = "Local folder";
-pub const EDITOR_LABEL_ACCOUNT: &str = "Account id";
-pub const EDITOR_LABEL_FOLDER_ID: &str = "Folder id";
+pub const EDITOR_LABEL_DEST: &str = "Destination";
+/// The destination button's name; it shows the folder's path, or
+/// [`EDITOR_DEST_NONE`] before one is chosen.
+pub const EDITOR_DEST_BUTTON: &str = "Frame.io folder";
+pub const EDITOR_DEST_NONE: &str = "Choose destination";
 pub const EDITOR_LABEL_NAME: &str = "Label";
 pub const EDITOR_LABEL_DIRECTION: &str = "Direction";
 pub const EDITOR_LABEL_ON_CHANGE: &str = "On change";
@@ -729,6 +735,7 @@ enum Decision {
     Cancel,
     Save,
     Choose,
+    Destination,
 }
 
 /// Draws the editor when one is open, and reports what it decided.
@@ -741,10 +748,13 @@ fn editor(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<Action>) {
         return;
     };
     let ctx = ui.ctx().clone();
-    match editor_dialog(&ctx, editor) {
+    // The destination picker opens over the dialog: its keys aren't the dialog's.
+    let covered = state.dest_picker.is_some();
+    match editor_dialog(&ctx, editor, covered) {
         Decision::None => {}
         Decision::Cancel => state.watch_editor = None,
         Decision::Choose => *action = Some(Action::ChooseFolder),
+        Decision::Destination => *action = Some(Action::ChooseDestination),
         Decision::Save => {
             if let Some(editor) = state.watch_editor.take() {
                 *action = Some(Action::SaveWatch(editor));
@@ -763,11 +773,12 @@ fn editor(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<Action>) {
 /// fields — until every field it needs is usable. A watch Portal owns has no
 /// Save at all: its values are shown, off, and the sentence says where to change
 /// them.
-fn editor_dialog(ctx: &egui::Context, editor: &mut WatchEditor) -> Decision {
+fn editor_dialog(ctx: &egui::Context, editor: &mut WatchEditor, covered: bool) -> Decision {
     let mut decision = Decision::None;
     let mut cancel_clicked = false;
     let mut save_clicked = false;
     let mut choose_clicked = false;
+    let mut dest_clicked = false;
 
     let width = (ctx.content_rect().width() * 0.92).min(theme::size::MODAL_W);
     let read_only = editor.read_only;
@@ -834,15 +845,18 @@ fn editor_dialog(ctx: &egui::Context, editor: &mut WatchEditor) -> Decision {
                                 choose_clicked = true;
                             }
                         });
-                        editor_row(ui, EDITOR_LABEL_ACCOUNT, |ui, id| {
-                            let width = ui.available_width();
-                            editor_field(ui, &mut editor.account_id, "Paste the account id", width)
-                                .labelled_by(id);
-                        });
-                        editor_row(ui, EDITOR_LABEL_FOLDER_ID, |ui, id| {
-                            let width = ui.available_width();
-                            editor_field(ui, &mut editor.folder_id, "Paste the folder id", width)
-                                .labelled_by(id);
+                        editor_row(ui, EDITOR_LABEL_DEST, |ui, _id| {
+                            let chosen = !editor.folder_id.trim().is_empty();
+                            let shown = if !chosen {
+                                String::new()
+                            } else if editor.label.trim().is_empty() {
+                                editor.label_or_folder()
+                            } else {
+                                editor.label.clone()
+                            };
+                            if dest_button(ui, &shown) {
+                                dest_clicked = true;
+                            }
                         });
                         // The label defaults to the folder's own name, which is
                         // what the field's hint shows while it is empty.
@@ -905,12 +919,12 @@ fn editor_dialog(ctx: &egui::Context, editor: &mut WatchEditor) -> Decision {
                         );
                         // Cancel is focused the moment the dialog opens, as
                         // `openSpaceConfirm` focused `#sc-cancel`.
-                        if ui.memory(|memory| memory.focused().is_none()) {
+                        if !covered && ui.memory(|memory| memory.focused().is_none()) {
                             cancel.request_focus();
                         }
                         // Enter takes the focused button — Cancel — unless Save
                         // is the one that has it. Escape is `should_close`.
-                        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+                        let enter = !covered && ui.input(|input| input.key_pressed(egui::Key::Enter));
                         if enter && !save.as_ref().is_some_and(egui::Response::has_focus) {
                             cancel_clicked = true;
                         }
@@ -932,6 +946,9 @@ fn editor_dialog(ctx: &egui::Context, editor: &mut WatchEditor) -> Decision {
     if choose_clicked {
         decision = Decision::Choose;
     }
+    if dest_clicked {
+        decision = Decision::Destination;
+    }
     if save_clicked {
         decision = Decision::Save;
     }
@@ -948,6 +965,7 @@ fn editor_row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui, Id
             vec2(EDITOR_LABEL_W, theme::size::CONTROL_H),
             Layout::left_to_right(Align::Center),
             |ui| {
+                ui.set_min_width(EDITOR_LABEL_W);
                 ui.add(Label::new(
                     RichText::new(label).font(theme::detail()).color(theme::TEXT_3),
                 ))
@@ -955,6 +973,40 @@ fn editor_row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui, Id
         );
         add(ui, label.inner.id);
     });
+}
+
+/// The destination: a `.dest-pick` box with the folder glyph and the path (or
+/// the placeholder), opening the picker. Answers whether it was clicked.
+fn dest_button(ui: &mut egui::Ui, shown: &str) -> bool {
+    let size = vec2(ui.available_width(), theme::size::CONTROL_H);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let painter = ui.painter();
+    let border = if response.hovered() { theme::BORDER_3 } else { theme::BORDER_2 };
+    painter.rect_filled(rect, theme::R_S, theme::SURFACE);
+    painter.rect_stroke(rect, theme::R_S, theme::hairline(border), StrokeKind::Inside);
+    let icon = Rect::from_center_size(pos2(rect.left() + 18.0, rect.center().y), vec2(16.0, 16.0));
+    paint(painter, icon, Glyph::Folder, theme::TEXT_3, 16.0);
+    let (text, colour) = if shown.is_empty() { (EDITOR_DEST_NONE, theme::TEXT_4) } else { (shown, theme::TEXT) };
+    let width = rect.right() - 12.0 - (icon.right() + 8.0);
+    // Too long: the middle of the path goes, so the folder it ends at shows.
+    let measure = |t: &str| painter.layout_no_wrap(t.to_string(), theme::body(), colour).size().x;
+    let crumbs: Vec<&str> = text.split(" / ").collect();
+    let widths: Vec<f32> = crumbs.iter().map(|c| measure(c)).collect();
+    let fitted: Vec<&str> = fit_crumbs(&widths, measure(" / "), measure("…"), width)
+        .into_iter()
+        .map(|item| item.map_or("…", |i| crumbs[i]))
+        .collect();
+    let mut job = egui::text::LayoutJob::single_section(
+        fitted.join(" / "),
+        egui::text::TextFormat { font_id: theme::body(), color: colour, ..Default::default() },
+    );
+    job.wrap = egui::text::TextWrapping { max_width: width.max(0.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    let galley = painter.layout_job(job);
+    painter.galley(pos2(icon.right() + 8.0, rect.center().y - galley.size().y / 2.0), galley, colour);
+    let response = response.on_hover_text(text);
+    let enabled = ui.is_enabled();
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, EDITOR_DEST_BUTTON));
+    response.clicked()
 }
 
 /// `.input`: the surface fill, 10 px either side, the width it is given.
@@ -1801,8 +1853,8 @@ mod tests {
         harness.get_by_label(EDITOR_TITLE_EDIT);
         for label in [
             EDITOR_LABEL_FOLDER,
-            EDITOR_LABEL_ACCOUNT,
-            EDITOR_LABEL_FOLDER_ID,
+            EDITOR_LABEL_DEST,
+            EDITOR_DEST_BUTTON,
             EDITOR_LABEL_NAME,
             EDITOR_LABEL_DIRECTION,
             EDITOR_LABEL_ON_CHANGE,
@@ -1817,10 +1869,10 @@ mod tests {
             harness.get_by_label(EDITOR_LABEL_FOLDER).value().as_deref(),
             Some("/Users/chaos/Movies/Rushes")
         );
-        assert_eq!(harness.get_by_label(EDITOR_LABEL_ACCOUNT).value().as_deref(), Some("acct-fixture"));
+        let editor = harness.state().watch_editor.clone().unwrap();
         assert_eq!(
-            harness.get_by_label(EDITOR_LABEL_FOLDER_ID).value().as_deref(),
-            Some("fld:/Users/chaos/Movies/Rushes")
+            (editor.account_id.as_str(), editor.folder_id.as_str()),
+            ("acct-fixture", "fld:/Users/chaos/Movies/Rushes")
         );
         assert_eq!(harness.get_by_label(EDITOR_LABEL_NAME).value().as_deref(), Some("Rushes 2026"));
 
@@ -2007,7 +2059,7 @@ mod tests {
         // fill in, and the destination starts at the one the app remembers.
         harness.get_by_label(EDITOR_TITLE_NEW);
         assert_eq!(harness.get_by_label(EDITOR_LABEL_FOLDER).value().as_deref(), Some(""));
-        assert_eq!(harness.get_by_label(EDITOR_LABEL_ACCOUNT).value().as_deref(), Some("acct-9"));
+        assert_eq!(harness.state().watch_editor.as_ref().unwrap().account_id, "acct-9");
         assert_eq!(
             harness.get_by_label(EDITOR_LABEL_NAME).value().as_deref(),
             Some("Shows / Nightfall")
@@ -2018,6 +2070,19 @@ mod tests {
             "nothing is asked for until Save: {:?}",
             harness.state().requests
         );
+    }
+
+    #[test]
+    fn the_frameio_folder_opens_the_destination_picker() {
+        let mut harness = screen_harness(state_with_editor(Vec::new(), draft("")));
+        harness.run();
+        harness.get_by_label(EDITOR_DEST_BUTTON).click();
+        harness.run();
+        assert_eq!(
+            harness.state().requests,
+            vec![Request::OpenDest { mode: DestMode::Watch, at: None }]
+        );
+        assert!(harness.state().watch_editor.is_some(), "the dialog stays under the picker");
     }
 
     #[test]

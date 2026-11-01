@@ -300,9 +300,10 @@ impl App {
         }
         *self.started.lock().unwrap() = Some(Instant::now());
         self.open_at_login.store(crate::login::enabled(), Ordering::Relaxed);
+        // Requests that came in while the app was starting stay queued for the
+        // window to take (`take_service_requests`); `start` tells it they're there.
         crate::services::start(Arc::clone(self) as Arc<dyn crate::services::ServiceHost>);
         self.init_updates();
-        self.start_services();
         // Portal's poller: idle until Portal is switched on in the settings.
         self.refresh_portal_credential();
         portal::agent::spawn(Arc::clone(self));
@@ -352,18 +353,6 @@ impl App {
             "Transfers complete".to_string()
         };
         crate::notify::notify("FioTransfer", &msg, Some("Glass"));
-    }
-
-    fn start_services(&self) {
-        // Requests that came in while the app was starting.
-        if !crate::services::take().is_empty() {
-            self.serve_requests();
-        }
-    }
-
-    fn serve_requests(&self) {
-        self.show_window();
-        self.emit("service", json!(null));
     }
 
     // ---------- Updates ----------

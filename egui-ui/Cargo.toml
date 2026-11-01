@@ -41,6 +41,8 @@ egui = "0.33.3"
 # rustls and rusqlite underneath, none of which build for wasm32 — the browser
 # capture is a renderer of the fixture and has no backend (see `src/wasm.rs`).
 fiotransfer-core = { path = "../core" }
+# The menu bar item, the download panel and Finder's services (AppKit, macOS).
+fiotransfer-sys = { path = "../sys" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "time", "sync", "macros"] }
 egui_kittest = { version = "0.33.3", features = ["wgpu", "snapshot"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }

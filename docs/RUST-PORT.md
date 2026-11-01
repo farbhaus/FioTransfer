@@ -7,14 +7,18 @@ providers, the same updater.
 **One app.** `FioTransfer` is an egui application (`egui-ui/`, package
 `fiotransfer-egui`) drawing the same four screens, and it runs the real engine
 through `fiotransfer-core` (`core/`). There is no webview: the WKWebView shell
-that used to be the macOS bundle, its AppKit menu bar item, its download panel
-and its Finder services are retired, and so is the HTML/CSS/JS front end they
-rendered. The root package is now only the command line (`fio`) and the
-measuring harness (`fio-bench`).
+that used to be the macOS bundle is retired, and so is the HTML/CSS/JS front end
+it rendered. The menu bar item, the "Download from Link…" panel and the Finder
+services are the Go app's AppKit code (`sys/mac/*.m`), compiled by
+`sys/build.rs` and connected to the egui shell by `egui-ui/src/menubar.rs`.
+Closing the window hides the app; quitting is the menu's (or ⌘Q's). The root
+package is now only the command line (`fio`) and the measuring harness
+(`fio-bench`).
 
 ```
 cargo run -p fiotransfer-egui          # the app
-make app                               # build FioTransfer.app (ad-hoc signed)
+make app                               # build FioTransfer.app (ad-hoc signed, version "dev")
+make dmg                               # universal .dmg/.zip in dist/ (scripts/package.sh, as CI)
 make cli                               # build bin/fio
 make bench                             # build bin/fio-bench
 make test                              # cargo test --workspace
@@ -141,10 +145,11 @@ sink; its numbers are not quoted above.
   that do not need a real account were exercised.
 * Anything against the real Frame.io API: every request path was exercised
   against the stand-in servers only.
-* The menu bar item, the download panel and the Finder services were retired
-  with the webview shell: the egui app has a window and nothing else. The file
-  and folder panels it does use go through the OS (`osascript`, `zenity`,
-  PowerShell) and were exercised as far as a background session can.
+* The menu bar item, the download panel and the Finder services: the AppKit
+  code is the Go app's, whose layout was checked then; the app was launched
+  with them, but nobody has looked at them on screen since the port. The file
+  and folder panels go through the OS (`osascript`, `zenity`, PowerShell) and
+  were exercised as far as a background session can.
 * The app was never signed in against Adobe from this session, so the screens
   were rendered from the fixture state, not from a live account.
 * The Go test suite (4,655 lines) was not ported. 53 cheap unit tests were
@@ -161,10 +166,11 @@ the presigned part URLs, the file's size and mtime — plus an append-only `.don
 list naming the parts already on Frame.io. Each finished part appends one line;
 that is the whole write cost.
 
-If the upload stops (user cancel, quit, crash), the ledger stays and the copy on
-Frame.io is **not** deleted. The next attempt at the same file, to the same
-folder, with the same size and mtime, resumes: only the missing parts are sent,
-and the log says so (`9/32 parts already on Frame.io`).
+An upload that stops on a failure, a cancel, a quit or a change is deleted from
+Frame.io and its ledger dropped, as the Go app did (`tests/upload_discard.rs`).
+Only a crash leaves the ledger: the next attempt at the same file, to the same
+folder, with the same size and mtime, resumes while it's fresh — only the missing
+parts are sent, and the log says so (`9/32 parts already on Frame.io`).
 
 * **Freshness.** Presigned URLs expire. A ledger older than
   `FIO_UPLOAD_RESUME_SECS` (default one hour) is not trusted.

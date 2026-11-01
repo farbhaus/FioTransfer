@@ -103,6 +103,8 @@ impl FioApp {
         self.tick_toasts(ctx);
         self.sidebar(ctx);
         self.screen(ctx);
+        // Over whichever screen opened it (Transfers, or the watch editor).
+        crate::views::dest::show(ctx, &mut self.state);
         draw_toasts(ctx, &self.state.toasts);
     }
 
@@ -110,10 +112,14 @@ impl FioApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn drive_shell(&mut self, ctx: &egui::Context) {
         let Some(shell) = self.shell.as_mut() else { return };
+        shell.attach(ctx);
         shell.pump(&mut self.state);
         if shell.take_focus() {
-            // `Host::show_window`: a Finder service or a sign-in brought the app
-            // back to the front.
+            // `Host::show_window`: the menu bar, a Finder service or a sign-in
+            // brought the app back to the front, hidden or not.
+            fiotransfer_sys::tray::activate();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         if shell.take_close() {
@@ -130,8 +136,9 @@ impl FioApp {
     #[cfg(target_arch = "wasm32")]
     fn drive_shell(&mut self, _ctx: &egui::Context) {}
 
-    /// A close was requested. With transfers running the shell asks first
-    /// (`Host::question`) and cancels this close; otherwise the app's
+    /// A close was requested. On macOS the shell hides the app instead, unless a
+    /// quit was agreed; elsewhere, with transfers running, it asks first
+    /// (`Host::question`) and cancels this close. Otherwise the app's
     /// `shutdown()` runs here, before the window goes.
     #[cfg(not(target_arch = "wasm32"))]
     fn on_close_requested(&mut self, ctx: &egui::Context) {

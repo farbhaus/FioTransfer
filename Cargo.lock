@@ -1521,6 +1521,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "fiotransfer-core",
+ "fiotransfer-sys",
  "image",
  "proptest",
  "serde",
@@ -1535,6 +1536,7 @@ dependencies = [
 name = "fiotransfer-sys"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "libc",
  "proptest",
  "tempfile",

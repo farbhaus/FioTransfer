@@ -227,6 +227,7 @@ pub fn fixture_state(view: View) -> UiState {
         // No dialog is open in a picture of the screen; `watch_editor.png` opens
         // one on top of exactly this state.
         watch_editor: None,
+        dest_picker: None,
         // What the last reading found: two projects the walk added up (one of
         // them not whole — a permission error part way), and one Frame.io sized
         // itself, so its row shows a dash where a file count would be.

@@ -153,6 +153,24 @@ pub enum Request {
     },
     RequeueCanceled(String),
 
+    /// Open the destination picker (`openDestAt`). An upload opens it at the
+    /// remembered destination, `at` one of its levels: `-1` the project list,
+    /// `0` the project, `1…` its folders, `None` the folder itself. The watch
+    /// editor opens it at the editor's folder.
+    OpenDest { mode: DestMode, at: Option<i32> },
+    /// List the picker's top level (`ListAccounts` … `ListFolders`). `skip` goes
+    /// on into a level with a single row when it's an account or a workspace.
+    DestLoad { skip: bool },
+    /// Search the account for the picker's query (`Search`).
+    DestSearch,
+    /// Open the picker where a search hit is (`PathTo`).
+    DestGoTo(DestNode),
+    /// Make a folder in the picker's level and go into it (`CreateFolder`).
+    DestNewFolder(String),
+    /// The picker's "Upload here": remember the folder (`SetUploadDestination`),
+    /// then upload what was waiting for it.
+    DestChoose,
+
     /// Walk every account, workspace and project again (`RefreshSpace`).
     RefreshSpace,
     /// Delete one project on Frame.io (`DeleteProject(account, project)`).
@@ -208,6 +226,8 @@ pub struct UiState {
     /// opened, or `None` when no dialog is up. The screen owns it, so nothing
     /// the app reads on a tick can close a dialog under the user's hands.
     pub watch_editor: Option<WatchEditor>,
+    /// The destination picker, while it's open (over any screen).
+    pub dest_picker: Option<DestPicker>,
     /// What the last Frame.io storage reading found, one row per project.
     pub space: Vec<SpaceRow>,
     /// One row per account: how much it uses against its limit, for the Space
@@ -268,6 +288,192 @@ pub struct HistoryRow {
 pub struct Crumb {
     pub kind: String,
     pub name: String,
+}
+
+// ---------- the destination picker ----------
+
+/// A row of the destination picker: an account, workspace, project or folder
+/// (the core's `Node`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DestNode {
+    pub id: String,
+    pub name: String,
+    /// account | workspace | project | folder
+    pub kind: String,
+    /// Where a project or folder keeps its files (a project's root folder).
+    pub folder_id: String,
+    /// A search hit's project.
+    pub where_: String,
+    /// A search hit from anywhere in the account rather than a row of this level.
+    pub remote: bool,
+}
+
+/// What the picker's Choose does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestMode {
+    /// Remember the folder as the upload destination, then upload `pending`.
+    Upload { pending: Vec<String> },
+    /// Put the folder in the watch editor.
+    Watch,
+}
+
+/// The destination picker (`#dest-modal`): a level at a time from the accounts
+/// down, with a search over the level and the whole account.
+#[derive(Debug, Clone)]
+pub struct DestPicker {
+    pub mode: DestMode,
+    /// The levels opened: account, workspace, project, then folders.
+    pub stack: Vec<DestNode>,
+    /// The deepest path shown: the destination the picker opened at, or where
+    /// the user came back up from. Past the open level, its crumbs stay on
+    /// screen (dimmed) and lead back down.
+    pub trail: Vec<DestNode>,
+    /// The rows of the top level; `None` while they load.
+    pub items: Option<Vec<DestNode>>,
+    pub error: String,
+    pub query: String,
+    /// What the account-wide search found for `query`; `None` while it runs.
+    pub hits: Option<Vec<DestNode>>,
+    pub hits_error: String,
+    /// When `query` last changed (egui time), so the search waits for a pause.
+    pub typed_at: f64,
+    /// The search for this `query` has been asked for.
+    pub searched: bool,
+    /// The keyboard's row, and whether the keyboard moved it.
+    pub sel: usize,
+    pub kbd: bool,
+    /// The New folder name field, while it's open.
+    pub new_folder: Option<String>,
+    /// Bumped for each level (`seq`) and each search (`qseq`) asked for: only
+    /// the newest answer lands.
+    pub seq: u64,
+    pub qseq: u64,
+    /// The search field takes the keyboard when the picker opens.
+    pub focus_query: bool,
+}
+
+impl DestPicker {
+    pub fn new(mode: DestMode) -> DestPicker {
+        DestPicker {
+            mode,
+            stack: Vec::new(),
+            trail: Vec::new(),
+            items: None,
+            error: String::new(),
+            query: String::new(),
+            hits: None,
+            hits_error: String::new(),
+            typed_at: 0.0,
+            searched: false,
+            sel: 0,
+            kbd: false,
+            new_folder: None,
+            seq: 0,
+            qseq: 0,
+            focus_query: true,
+        }
+    }
+
+    pub fn top(&self) -> Option<&DestNode> {
+        self.stack.last()
+    }
+
+    /// The trail's levels below the open one, when the open level is on it.
+    pub fn forward(&self) -> &[DestNode] {
+        let n = self.stack.len();
+        let on_trail = self.trail.len() > n && self.trail.iter().zip(&self.stack).all(|(a, b)| a.id == b.id);
+        if on_trail { &self.trail[n..] } else { &[] }
+    }
+
+    /// Going up to `depth`: what was open stays as the trail back down, unless
+    /// it's already on a deeper one.
+    pub fn go_up(&mut self, depth: usize) {
+        if self.forward().is_empty() {
+            self.trail = self.stack.clone();
+        }
+        self.stack.truncate(depth);
+    }
+
+    /// A project or a folder is open: files can go here.
+    pub fn in_folder(&self) -> bool {
+        self.top().is_some_and(|t| t.kind == "project" || t.kind == "folder")
+    }
+
+    /// The destination's name: the project and the folders under it.
+    pub fn label(&self) -> String {
+        let from = self.stack.iter().position(|n| n.kind == "project").unwrap_or(self.stack.len());
+        self.stack[from..].iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(" / ")
+    }
+
+    /// The account a search looks in: the open one, else the remembered one.
+    pub fn search_account(&self, settings: &Settings) -> String {
+        match self.stack.iter().find(|n| n.kind == "account") {
+            Some(a) => a.id.clone(),
+            None => settings.last_account_id.clone(),
+        }
+    }
+
+    /// Empties the search, dropping any answer still on its way.
+    pub fn clear_query(&mut self) {
+        self.query.clear();
+        self.hits = None;
+        self.hits_error.clear();
+        self.searched = false;
+        self.sel = 0;
+        self.kbd = false;
+        self.qseq += 1;
+    }
+
+    /// The rows the list shows, in order: this level's matches, then the
+    /// account's hits that aren't among them (`D.rows`).
+    pub fn rows(&self) -> (Vec<DestNode>, Vec<DestNode>) {
+        let q = self.query.trim().to_lowercase();
+        let here: Vec<DestNode> = self
+            .items
+            .iter()
+            .flatten()
+            .filter(|n| q.is_empty() || n.name.to_lowercase().contains(&q))
+            .cloned()
+            .collect();
+        let there: Vec<DestNode> = match (&self.hits, q.is_empty()) {
+            (Some(hits), false) => hits.iter().filter(|h| !here.iter().any(|n| n.id == h.id)).cloned().collect(),
+            _ => Vec::new(),
+        };
+        (here, there)
+    }
+}
+
+/// Which crumbs of a path fit in `width`, given each crumb's width and the
+/// separator's and ellipsis's: all of them, else the first, an ellipsis
+/// (`None`) and as many of the last as fit. The last crumb — the folder the
+/// path ends at — is the one never dropped.
+pub fn fit_crumbs(widths: &[f32], sep: f32, ellipsis: f32, width: f32) -> Vec<Option<usize>> {
+    let n = widths.len();
+    let total: f32 = widths.iter().sum::<f32>() + sep * n.saturating_sub(1) as f32;
+    if total <= width || n <= 1 {
+        return (0..n).map(Some).collect();
+    }
+    for tail in (1..n.saturating_sub(1)).rev() {
+        let kept: f32 = widths[n - tail..].iter().sum();
+        let w = widths[0] + ellipsis + kept + sep * (tail + 1) as f32;
+        if w <= width {
+            let mut out = vec![Some(0), None];
+            out.extend((n - tail..n).map(Some));
+            return out;
+        }
+    }
+    vec![None, Some(n - 1)]
+}
+
+/// `-1` the project list, `0` the project, `1…` its folders, `None` all of it:
+/// how much of a path the picker opens at (`openDestAt`).
+pub fn cut_path(mut path: Vec<DestNode>, at: Option<i32>) -> Vec<DestNode> {
+    let (Some(at), Some(project)) = (at, path.iter().position(|n| n.kind == "project")) else {
+        return path;
+    };
+    let keep = (project as i32 + 1 + at).max(0) as usize;
+    path.truncate(keep.min(path.len()));
+    path
 }
 
 /// The `InspectLink` payload the composer's preview is built from.
@@ -887,11 +1093,8 @@ impl WatchEditor {
         if !local.starts_with('/') {
             return Some("The folder has to be an absolute path, starting at /.");
         }
-        if self.account_id.trim().is_empty() {
-            return Some("Paste the Frame.io account id.");
-        }
-        if self.folder_id.trim().is_empty() {
-            return Some("Paste the Frame.io folder id.");
+        if self.account_id.trim().is_empty() || self.folder_id.trim().is_empty() {
+            return Some("Choose the Frame.io folder.");
         }
         None
     }
@@ -1271,6 +1474,95 @@ mod tests {
         assert!(watch_blocks(&[]).is_empty());
     }
 
+    // ---------- the destination picker ----------
+
+    fn node(kind: &str, name: &str) -> DestNode {
+        DestNode { id: format!("{kind}:{name}"), name: name.into(), kind: kind.into(), folder_id: format!("f:{name}"), ..Default::default() }
+    }
+
+    fn path() -> Vec<DestNode> {
+        vec![node("account", "Farbhaus"), node("workspace", "Main"), node("project", "Nightfall"), node("folder", "Ep 1"), node("folder", "Renders")]
+    }
+
+    #[test]
+    fn the_picker_opens_at_the_level_clicked() {
+        let names = |p: Vec<DestNode>| p.into_iter().map(|n| n.name).collect::<Vec<_>>();
+        assert_eq!(names(cut_path(path(), None)).len(), 5, "the destination itself");
+        assert_eq!(names(cut_path(path(), Some(-1))), ["Farbhaus", "Main"], "the project list");
+        assert_eq!(names(cut_path(path(), Some(0))), ["Farbhaus", "Main", "Nightfall"]);
+        assert_eq!(names(cut_path(path(), Some(1))), ["Farbhaus", "Main", "Nightfall", "Ep 1"]);
+        assert_eq!(names(cut_path(path(), Some(9))).len(), 5, "never past the end");
+        assert_eq!(cut_path(Vec::new(), Some(0)), Vec::new());
+    }
+
+    #[test]
+    fn the_label_starts_at_the_project() {
+        let mut p = DestPicker::new(DestMode::Watch);
+        p.stack = path();
+        assert_eq!(p.label(), "Nightfall / Ep 1 / Renders");
+        assert!(p.in_folder());
+        p.stack.truncate(2);
+        assert_eq!(p.label(), "");
+        assert!(!p.in_folder(), "a workspace holds projects, not files");
+    }
+
+    #[test]
+    fn rows_filter_the_level_and_add_hits_from_elsewhere() {
+        let mut p = DestPicker::new(DestMode::Watch);
+        p.items = Some(vec![node("folder", "Renders"), node("folder", "Audio"), node("folder", "Rushes")]);
+        let (here, there) = p.rows();
+        assert_eq!((here.len(), there.len()), (3, 0));
+        p.query = "r".into();
+        p.hits = Some(vec![node("folder", "Rushes"), DestNode { remote: true, ..node("folder", "Reels") }]);
+        let (here, there) = p.rows();
+        assert_eq!(here.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["Renders", "Rushes"]);
+        assert_eq!(there.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["Reels"], "a hit already listed here isn't repeated");
+    }
+
+    #[test]
+    fn the_trail_leads_back_down_from_where_the_picker_opened() {
+        let mut p = DestPicker::new(DestMode::Watch);
+        p.trail = path();
+        p.stack = cut_path(path(), Some(0));
+        let names = |n: &[DestNode]| n.iter().map(|n| n.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(p.forward()), ["Ep 1", "Renders"], "the rest of the destination");
+        p.stack.push(node("folder", "Sound"));
+        assert!(p.forward().is_empty(), "off the trail");
+
+        // Going up from somewhere else leaves a way back to it.
+        p.go_up(3);
+        assert_eq!(names(p.forward()), ["Sound"]);
+        // Going further up along the same trail keeps it whole.
+        p.go_up(2);
+        assert_eq!(names(p.forward()), ["Nightfall", "Sound"]);
+    }
+
+    #[test]
+    fn crumbs_that_dont_fit_lose_the_middle_never_the_end() {
+        let w = [100.0, 80.0, 60.0, 40.0];
+        assert_eq!(fit_crumbs(&w, 10.0, 15.0, 1000.0), [Some(0), Some(1), Some(2), Some(3)]);
+        // 100 + 15 + 60 + 40 + 3 seps = 245
+        assert_eq!(fit_crumbs(&w, 10.0, 15.0, 250.0), [Some(0), None, Some(2), Some(3)]);
+        assert_eq!(fit_crumbs(&w, 10.0, 15.0, 180.0), [Some(0), None, Some(3)]);
+        assert_eq!(fit_crumbs(&w, 10.0, 15.0, 50.0), [None, Some(3)]);
+        assert_eq!(fit_crumbs(&[300.0], 10.0, 15.0, 50.0), [Some(0)]);
+        assert!(fit_crumbs(&[], 10.0, 15.0, 50.0).is_empty());
+    }
+
+    #[test]
+    fn a_search_looks_in_the_open_account_or_the_remembered_one() {
+        let mut settings = Settings::default();
+        settings.last_account_id = "acct-remembered".into();
+        let mut p = DestPicker::new(DestMode::Watch);
+        assert_eq!(p.search_account(&settings), "acct-remembered");
+        p.stack = path();
+        assert_eq!(p.search_account(&settings), "account:Farbhaus");
+        let qseq = p.qseq;
+        p.query = "abc".into();
+        p.clear_query();
+        assert!(p.query.is_empty() && p.qseq > qseq, "a cleared query drops the answer on its way");
+    }
+
     // ---------- the watch folder editor ----------
 
     fn row_for_editor() -> WatchRow {
@@ -1336,9 +1628,9 @@ mod tests {
             Some("The folder has to be an absolute path, starting at /.")
         );
         editor.local = "/Users/chaos/Movies/Rushes".to_string();
-        assert_eq!(editor.reason(), Some("Paste the Frame.io account id."));
+        assert_eq!(editor.reason(), Some("Choose the Frame.io folder."));
         editor.account_id = "acct-1".to_string();
-        assert_eq!(editor.reason(), Some("Paste the Frame.io folder id."));
+        assert_eq!(editor.reason(), Some("Choose the Frame.io folder."));
         editor.folder_id = "fld-1".to_string();
         assert_eq!(editor.reason(), None);
         // The label is never a reason: empty means the folder's own name.

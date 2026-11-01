@@ -29,11 +29,19 @@ use fiotransfer_egui::{FioApp, Shell, MIN_HEIGHT, MIN_WIDTH, WINDOW_HEIGHT, WIND
 
 fn main() -> eframe::Result<()> {
     let launch = launch_from_args(std::env::args().skip(1));
+    if launch.backend {
+        // Finder's right-click services. macOS launches the app to serve one, so
+        // the provider must be in place as the app finishes launching.
+        fiotransfer_sys::services::set_service_hook(fiotransfer_core::services::service_from_c);
+        fiotransfer_sys::services::services_init();
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
             .with_min_inner_size([MIN_WIDTH, MIN_HEIGHT])
-            .with_title("FioTransfer"),
+            .with_title("FioTransfer")
+            // Open at login starts the app in the menu bar, without the window.
+            .with_visible(!launch.hidden),
         ..Default::default()
     };
     eframe::run_native(
@@ -51,6 +59,8 @@ struct Launch {
     state: UiState,
     /// `false` for `--fixture` and `--snapshot`: a window with no backend.
     backend: bool,
+    /// `--hidden`: started by the login item, in the menu bar only.
+    hidden: bool,
 }
 
 /// The window: the real app when `launch` asked for one, a pure renderer when it
@@ -69,6 +79,7 @@ fn app(launch: Launch) -> FioApp {
 fn launch_from_args(args: impl Iterator<Item = String>) -> Launch {
     let mut state = UiState::default();
     let mut backend = true;
+    let mut hidden = false;
     let args: Vec<String> = args.collect();
     let mut i = 0;
     while i < args.len() {
@@ -92,11 +103,12 @@ fn launch_from_args(args: impl Iterator<Item = String>) -> Launch {
                     None => eprintln!("fiotransfer-egui: --snapshot needs a file"),
                 }
             }
+            "--hidden" => hidden = true,
             other => eprintln!("fiotransfer-egui: unknown argument {other}"),
         }
         i += 1;
     }
-    Launch { state, backend }
+    Launch { state, backend, hidden }
 }
 
 fn read_snapshot(path: &str) -> Result<Snapshot, String> {
@@ -175,6 +187,13 @@ mod tests {
         assert_eq!(state.history.len(), expected.history.len());
         assert_eq!(state.view, View::Transfers);
         assert!(state.logged_in);
+    }
+
+    #[test]
+    fn the_login_item_starts_the_app_hidden() {
+        let launch = launch_from_args(["--hidden".to_string()].into_iter());
+        assert!(launch.backend && launch.hidden);
+        assert!(!launch_from_args(std::iter::empty()).hidden);
     }
 
     #[test]

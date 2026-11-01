@@ -29,7 +29,7 @@
 //! Answers come back over one `std::sync::mpsc` channel of [`Update`]s, which is
 //! also what the `Host` uses for `emit`, `show_window` and `quit`.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
@@ -37,15 +37,19 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use fiotransfer_core::app::{App, State, UpdateStatus};
+use fiotransfer_core::app::{App, Node, State, UpdateStatus};
+use fiotransfer_core::config::Crumb as PathCrumb;
 use fiotransfer_core::history;
 use fiotransfer_core::host::Host;
 use fiotransfer_core::portal::agent::PortalStatus;
+use fiotransfer_core::share;
 use fiotransfer_core::xfer::{DownloadOptions, LinkInfo};
 
+use crate::menubar;
 use crate::model::{
-    fmt_bytes, in_block_order, Crumb, HistoryRow, LinkInfo as UiLinkInfo, PortalView, Request,
-    ToastKind, UiState, UpdateState, View, WatchRow,
+    cut_path, fmt_bytes, in_block_order, Crumb, DestMode, DestNode, DestPicker, HistoryRow,
+    LinkInfo as UiLinkInfo, PortalView, Request, ToastKind, UiState, UpdateState, View, WatchEditor,
+    WatchRow,
 };
 use crate::platform;
 
@@ -67,8 +71,11 @@ const HISTORY_LIMIT: i64 = 500;
 #[derive(Debug)]
 pub enum Update {
     /// An event the app emitted: `state-changed`, `update`, `service`,
-    /// `files-dropped` (and `menu` if a menu bar is ever wired up again).
+    /// `files-dropped`.
     Event(String, Value),
+    /// A menu bar item (or the app menu's Check for Updates… or Quit) was
+    /// chosen: one of `menubar`'s tags.
+    Menu(i32),
     /// The app wants its window in front of the user.
     ShowWindow,
     /// The app is finished (an update installed, or the user asked): close.
@@ -111,6 +118,18 @@ pub enum Done {
     SignedInTotp(Result<Box<PortalStatus>, String>),
     /// The clipboard's text, for the composer's link field (`Paste`).
     Clipboard(String),
+    /// Files or a folder chosen to upload (`PickFiles`, `PickFolder`).
+    Picked(Vec<String>),
+    /// A picker level's rows, for the level asked under `seq`.
+    DestLevel { seq: u64, skip: bool, result: Result<Vec<DestNode>, String> },
+    /// The account search's hits, for the query asked under `seq`.
+    DestHits { seq: u64, result: Result<Vec<DestNode>, String> },
+    /// A path to open the picker at (`PathTo`), asked under `seq`: `at` is how
+    /// much of it, `remember` keeps it as the upload destination's path, and
+    /// `goto` says it was a search hit.
+    DestPath { seq: u64, at: Option<i32>, remember: bool, goto: bool, result: Result<Vec<DestNode>, String> },
+    /// A folder made in the picker's level (`CreateFolder`), under `seq`.
+    DestFolder { seq: u64, result: Result<DestNode, String> },
 }
 
 /// The app, its runtime and the channel the two talk over.
@@ -159,6 +178,17 @@ pub struct Shell {
     asking: bool,
     /// `shutdown` has run.
     stopped: bool,
+    /// When the shell started: a re-open in the first seconds is the launch
+    /// itself, not the user asking for the window.
+    started: Instant,
+    /// The menu bar item and the download panel are connected.
+    menubar: bool,
+    /// Folders from Finder's "Create Watch Folder", opened in the editor one at
+    /// a time. A Cancel drops the rest.
+    watch_queue: VecDeque<String>,
+    /// The editor on screen came from `watch_queue`, and whether it was saved.
+    queued_editor: bool,
+    queued_saved: bool,
 }
 
 impl Shell {
@@ -207,6 +237,11 @@ impl Shell {
             quit_ok: false,
             asking: false,
             stopped: false,
+            started: Instant::now(),
+            menubar: false,
+            watch_queue: VecDeque::new(),
+            queued_editor: false,
+            queued_saved: false,
         };
         // `state` decides nothing else: the first `pump` reads the real one.
         let _ = &state;
@@ -243,6 +278,7 @@ impl Shell {
         while let Ok(update) = self.rx.try_recv() {
             self.apply(update, ui);
         }
+        self.next_queued_watch(ui);
         if self.first {
             // Everything, once, before the first frame is drawn: who is signed
             // in, the settings, the version, the queue and the watch folders. The
@@ -264,6 +300,17 @@ impl Shell {
         if self.active { ACTIVE_TICK } else { IDLE_TICK }
     }
 
+    /// Connects the menu bar item and the download panel, once the window's
+    /// context exists (macOS; elsewhere there is nothing to connect).
+    pub fn attach(&mut self, ctx: &egui::Context) {
+        if self.menubar {
+            return;
+        }
+        let Some(rt) = &self.rt else { return };
+        self.menubar = true;
+        menubar::install(self.app.clone(), rt.handle().clone(), self.tx.clone(), ctx.clone());
+    }
+
     /// `true` once, when the app asked for its window in front of the user.
     pub fn take_focus(&mut self) -> bool {
         std::mem::take(&mut self.focus)
@@ -274,10 +321,19 @@ impl Shell {
         std::mem::take(&mut self.close)
     }
 
-    /// The window is being closed. Answers whether the close may go ahead now:
-    /// when transfers are running it asks first, and closes on the next frame if
-    /// the answer is `Quit` (`Update::Quit`).
+    /// The window is being closed. Answers whether the close may go ahead now.
+    /// On macOS closing the window hides the app, which keeps running in the menu
+    /// bar; quitting is the menu's (or ⌘Q's) and asks first while transfers run.
+    /// Elsewhere there is no menu bar item: it asks, and closes on the next frame
+    /// if the answer is `Quit` (`Update::Quit`).
     pub fn on_close_request(&mut self) -> bool {
+        if self.quit_ok {
+            return true;
+        }
+        if cfg!(target_os = "macos") {
+            fiotransfer_sys::tray::hide();
+            return false;
+        }
         self.may_quit()
     }
 
@@ -301,25 +357,21 @@ impl Shell {
     fn handle(&mut self, request: Request, ui: &mut UiState) {
         match request {
             // ---- panels ----
+            // What's chosen goes through `start_upload`, which asks for a
+            // destination first when there's none yet.
             Request::PickFiles => {
                 self.panel(|app, tx| {
                     let paths = app.pick_files();
                     if !paths.is_empty() {
-                        if let Err(err) = app.start_upload(paths) {
-                            toast(&tx, err, ToastKind::Err);
-                        }
+                        let _ = tx.send(Update::Done(Done::Picked(paths)));
                     }
-                    let _ = tx.send(Update::Done(Done::Changed));
                 });
             }
             Request::PickFolder => {
                 self.panel(|app, tx| {
                     if let Some(folder) = app.pick_folder() {
-                        if let Err(err) = app.start_upload(vec![folder]) {
-                            toast(&tx, err, ToastKind::Err);
-                        }
+                        let _ = tx.send(Update::Done(Done::Picked(vec![folder])));
                     }
-                    let _ = tx.send(Update::Done(Done::Changed));
                 });
             }
             // The watch editor's "Choose…": a folder panel, and the answer goes
@@ -343,10 +395,7 @@ impl Shell {
             }
 
             // ---- transfers ----
-            Request::StartUpload(paths) => match self.app.start_upload(paths) {
-                Ok(_) => self.read_running(ui),
-                Err(err) => ui.push_toast(err, ToastKind::Err),
-            },
+            Request::StartUpload(paths) => self.start_upload(ui, paths),
             Request::InspectLink { link, passphrase } => self.inspect(link, passphrase),
             Request::StartDownload { link, passphrase, dest_dir, subfolder } => {
                 let options = DownloadOptions { link, passphrase, dest_dir, subfolder };
@@ -566,6 +615,9 @@ impl Shell {
             // nothing is read from the settings behind it. `add_watch` walks the
             // folder for its baseline, so it runs off the draw thread.
             Request::AddWatch { local, acct, folder, label, dir, on_change, include_existing } => {
+                if self.queued_editor {
+                    self.queued_saved = true;
+                }
                 self.spawn_blocking(move |app, tx| {
                     match app.add_watch(
                         &local,
@@ -621,6 +673,14 @@ impl Shell {
             }
 
             // ---- space ----
+            // ---- the destination picker ----
+            Request::OpenDest { mode, at } => self.open_dest(ui, mode, at),
+            Request::DestLoad { skip } => self.dest_load(ui, skip),
+            Request::DestSearch => self.dest_search(ui),
+            Request::DestGoTo(node) => self.dest_go_to(ui, node),
+            Request::DestNewFolder(name) => self.dest_new_folder(ui, name),
+            Request::DestChoose => self.dest_choose(ui),
+
             Request::RefreshSpace => self.refresh_space(),
             Request::DeleteProject { account_id, project_id, name } => {
                 let (app, tx) = (self.app.clone(), self.tx.clone());
@@ -653,6 +713,7 @@ impl Shell {
     fn apply(&mut self, update: Update, ui: &mut UiState) {
         match update {
             Update::Event(event, payload) => self.on_event(&event, payload, ui),
+            Update::Menu(tag) => self.on_menu(tag, ui),
             Update::ShowWindow => self.focus = true,
             Update::Quit => {
                 self.quit_ok = true;
@@ -699,6 +760,33 @@ impl Shell {
         match done {
             Done::Changed => self.read_all(ui),
             Done::Toast { text, kind } => ui.push_toast(text, kind),
+            Done::Picked(paths) => self.start_upload(ui, paths),
+            Done::DestLevel { seq, skip, result } => self.dest_level(ui, seq, skip, result),
+            Done::DestHits { seq, result } => {
+                if let Some(p) = ui.dest_picker.as_mut().filter(|p| p.qseq == seq) {
+                    match result {
+                        Ok(hits) => p.hits = Some(hits),
+                        Err(err) => p.hits_error = err,
+                    }
+                }
+            }
+            Done::DestPath { seq, at, remember, goto, result } => self.dest_path(ui, seq, at, remember, goto, result),
+            Done::DestFolder { seq, result } => {
+                if ui.dest_picker.as_ref().is_none_or(|p| p.seq != seq) {
+                    return;
+                }
+                match result {
+                    Ok(folder) => {
+                        if let Some(p) = ui.dest_picker.as_mut() {
+                            p.new_folder = None;
+                            p.clear_query();
+                            p.stack.push(folder);
+                        }
+                        self.dest_load(ui, false);
+                    }
+                    Err(err) => ui.push_toast(err, ToastKind::Err),
+                }
+            }
             Done::State(state) => self.apply_state(ui, *state),
             Done::Link { seq, info } => {
                 if seq != self.link_seq {
@@ -1044,9 +1132,228 @@ impl Shell {
         self.read_state(ui);
     }
 
+    /// Uploads to the remembered destination; with none yet, the picker opens
+    /// with the paths waiting for it (`startUpload`).
     fn start_upload(&mut self, ui: &mut UiState, paths: Vec<String>) {
+        if self.app.settings().last_folder_id.is_empty() {
+            self.open_dest(ui, DestMode::Upload { pending: paths }, None);
+            return;
+        }
         match self.app.start_upload(paths) {
             Ok(_) => self.read_running(ui),
+            Err(err) => ui.push_toast(err, ToastKind::Err),
+        }
+    }
+
+    // ---------- the destination picker ----------
+
+    /// Opens the picker (`openDest`, `openDestAt`): an upload at the remembered
+    /// destination, the watch editor at its folder, otherwise at the accounts.
+    fn open_dest(&mut self, ui: &mut UiState, mode: DestMode, at: Option<i32>) {
+        if !ui.logged_in {
+            // `ensureCanUpload`
+            let set_up = !ui.settings.client_id.is_empty();
+            ui.view = if set_up { View::Transfers } else { View::Settings };
+            ui.push_toast(if set_up { "Not signed in" } else { "Uploads not set up" }, ToastKind::Err);
+            return;
+        }
+        let settings = self.app.settings();
+        let start = match &mode {
+            DestMode::Upload { .. } => Some((settings.last_account_id.clone(), settings.last_folder_id.clone())),
+            DestMode::Watch => ui
+                .watch_editor
+                .as_ref()
+                .map(|e| (e.account_id.trim().to_string(), e.folder_id.trim().to_string())),
+        }
+        .filter(|(acct, folder)| !acct.is_empty() && !folder.is_empty());
+        ui.dest_picker = Some(DestPicker::new(mode));
+        let Some((acct, folder)) = start else {
+            return self.dest_load(ui, true);
+        };
+        // The remembered path, when it ends at that folder (`storedPath`).
+        let stored = folder == settings.last_folder_id
+            && settings.last_folder_path.last().is_some_and(|c| c.folder_id == folder);
+        if stored {
+            let path: Vec<DestNode> = settings.last_folder_path.iter().map(dest_crumb).collect();
+            if let Some(p) = ui.dest_picker.as_mut() {
+                p.trail = path.clone();
+                p.stack = cut_path(path, at);
+            }
+            return self.dest_load(ui, false);
+        }
+        // Chosen before paths were kept: ask Frame.io once, and keep it.
+        let remember = acct == settings.last_account_id && folder == settings.last_folder_id;
+        let Some(p) = ui.dest_picker.as_mut() else { return };
+        p.seq += 1;
+        let seq = p.seq;
+        let (app, tx) = (self.app.clone(), self.tx.clone());
+        self.spawn_task(async move {
+            let result = app.path_to(&acct, "folder", &folder).await.map(dest_nodes);
+            let _ = tx.send(Update::Done(Done::DestPath { seq, at, remember, goto: false, result }));
+        });
+    }
+
+    /// Lists the picker's top level: accounts, an account's workspaces, a
+    /// workspace's projects, or a project's or folder's folders.
+    fn dest_load(&mut self, ui: &mut UiState, skip: bool) {
+        let Some(p) = ui.dest_picker.as_mut() else { return };
+        p.seq += 1;
+        p.items = None;
+        p.error.clear();
+        let (seq, stack) = (p.seq, p.stack.clone());
+        let (app, tx) = (self.app.clone(), self.tx.clone());
+        self.spawn_task(async move {
+            let acct = stack.first().map(|n| n.id.clone()).unwrap_or_default();
+            let result = match stack.last() {
+                None => app.list_accounts().await,
+                Some(top) if top.kind == "account" => app.list_workspaces(&top.id).await,
+                Some(top) if top.kind == "workspace" => app.list_projects(&acct, &top.id).await,
+                Some(top) => app.list_folders(&acct, &top.folder_id).await,
+            };
+            let _ = tx.send(Update::Done(Done::DestLevel { seq, skip, result: result.map(dest_nodes) }));
+        });
+    }
+
+    /// A level's rows landed. A lone account or workspace is opened straight
+    /// away when `skip` (most people have one of each).
+    fn dest_level(&mut self, ui: &mut UiState, seq: u64, skip: bool, result: Result<Vec<DestNode>, String>) {
+        let Some(p) = ui.dest_picker.as_mut().filter(|p| p.seq == seq) else { return };
+        match result {
+            Ok(mut items) => {
+                let top = p.top().map(|t| t.kind.as_str());
+                if skip && items.len() == 1 && matches!(top, None | Some("account")) {
+                    p.stack.push(items.remove(0));
+                    return self.dest_load(ui, true);
+                }
+                // The way on down to the destination is the highlighted row.
+                let next = p.forward().first().map(|n| n.id.clone());
+                if let Some(i) = next.and_then(|id| items.iter().position(|n| n.id == id)) {
+                    p.sel = i;
+                    p.kbd = true;
+                }
+                p.items = Some(items);
+            }
+            Err(err) => {
+                // A refused session is a sign-in problem, not this folder's.
+                self.read_state(ui);
+                if !ui.logged_in {
+                    ui.dest_picker = None;
+                    ui.push_toast("Signed out — sign in again", ToastKind::Err);
+                    return;
+                }
+                if let Some(p) = ui.dest_picker.as_mut() {
+                    p.items = Some(Vec::new());
+                    p.error = err;
+                }
+            }
+        }
+    }
+
+    /// A path to open the picker at landed (the remembered destination's, or a
+    /// search hit's).
+    fn dest_path(
+        &mut self,
+        ui: &mut UiState,
+        seq: u64,
+        at: Option<i32>,
+        remember: bool,
+        goto: bool,
+        result: Result<Vec<DestNode>, String>,
+    ) {
+        if ui.dest_picker.as_ref().is_none_or(|p| p.seq != seq) {
+            return;
+        }
+        match result {
+            Ok(path) => {
+                if remember {
+                    let s = self.app.settings();
+                    let crumbs = path.iter().map(path_crumb).collect();
+                    if let Ok(state) = self.app.set_upload_destination(&s.last_account_id, &s.last_folder_id, &s.last_folder_label, crumbs) {
+                        self.apply_state(ui, state);
+                    }
+                }
+                if let Some(p) = ui.dest_picker.as_mut() {
+                    p.trail = path.clone();
+                    p.stack = cut_path(path, at);
+                }
+                self.dest_load(ui, false);
+            }
+            Err(err) => {
+                if goto {
+                    ui.push_toast(err, ToastKind::Err);
+                }
+                let empty = ui.dest_picker.as_ref().is_some_and(|p| p.stack.is_empty());
+                self.dest_load(ui, empty);
+            }
+        }
+    }
+
+    /// The account-wide search for the picker's query.
+    fn dest_search(&mut self, ui: &mut UiState) {
+        let Some(p) = ui.dest_picker.as_ref() else { return };
+        let acct = p.search_account(&ui.settings);
+        let query = p.query.trim().to_string();
+        if acct.is_empty() || query.chars().count() < 2 {
+            return;
+        }
+        let seq = p.qseq;
+        let (app, tx) = (self.app.clone(), self.tx.clone());
+        self.spawn_task(async move {
+            let result = app
+                .search(&acct, &query)
+                .await
+                .map(|hits| dest_nodes(hits).into_iter().map(|n| DestNode { remote: true, ..n }).collect());
+            let _ = tx.send(Update::Done(Done::DestHits { seq, result }));
+        });
+    }
+
+    /// Opens the picker where a search hit is: the path down to it.
+    fn dest_go_to(&mut self, ui: &mut UiState, node: DestNode) {
+        let Some(p) = ui.dest_picker.as_mut() else { return };
+        let acct = match p.stack.iter().find(|n| n.kind == "account") {
+            Some(a) => a.id.clone(),
+            None => ui.settings.last_account_id.clone(),
+        };
+        p.seq += 1;
+        p.items = None;
+        p.error.clear();
+        let seq = p.seq;
+        let (app, tx) = (self.app.clone(), self.tx.clone());
+        self.spawn_task(async move {
+            let result = app.path_to(&acct, &node.kind, &node.id).await.map(dest_nodes);
+            let _ = tx.send(Update::Done(Done::DestPath { seq, at: None, remember: false, goto: true, result }));
+        });
+    }
+
+    /// Makes a folder in the open project or folder; the picker goes into it.
+    fn dest_new_folder(&mut self, ui: &mut UiState, name: String) {
+        let Some(p) = ui.dest_picker.as_ref().filter(|p| p.in_folder()) else { return };
+        let (Some(acct), Some(top)) = (p.stack.first(), p.top()) else { return };
+        let (acct, parent, seq) = (acct.id.clone(), top.folder_id.clone(), p.seq);
+        let (app, tx) = (self.app.clone(), self.tx.clone());
+        self.spawn_task(async move {
+            let result = app.create_folder(&acct, &parent, &name).await.map(dest_node);
+            let _ = tx.send(Update::Done(Done::DestFolder { seq, result }));
+        });
+    }
+
+    /// "Upload here": the folder becomes the upload destination, path and all,
+    /// and what was waiting for it uploads.
+    fn dest_choose(&mut self, ui: &mut UiState) {
+        let Some(p) = ui.dest_picker.as_ref().filter(|p| p.in_folder()) else { return };
+        let DestMode::Upload { pending } = &p.mode else { return };
+        let (Some(acct), Some(top)) = (p.stack.first(), p.top()) else { return };
+        let (acct, folder, label) = (acct.id.clone(), top.folder_id.clone(), p.label());
+        let crumbs: Vec<PathCrumb> = p.stack.iter().map(path_crumb).collect();
+        let pending = pending.clone();
+        match self.app.set_upload_destination(&acct, &folder, &label, crumbs) {
+            Ok(state) => {
+                self.apply_state(ui, state);
+                ui.dest_picker = None;
+                if !pending.is_empty() {
+                    self.start_upload(ui, pending);
+                }
+            }
             Err(err) => ui.push_toast(err, ToastKind::Err),
         }
     }
@@ -1073,19 +1380,72 @@ impl Shell {
         self.focus = true;
         for request in requests {
             match request.kind.as_str() {
-                "upload" => self.start_upload(ui, request.paths),
-                "watch" => {
-                    // A watch needs a Frame.io folder, and the destination picker
-                    // is the Watch screen's; nothing here may invent one.
-                    if let Some(hist) = self.app.hist() {
-                        hist.log(&format!(
-                            "SERVICE  watch request for {}: choose a destination on the Watch Folders screen",
-                            request.paths.join(", ")
-                        ));
-                    }
+                // The destination bar isn't in view from Finder: the picker shows
+                // where they'll go, at the remembered destination.
+                "upload" => {
+                    ui.view = View::Transfers;
+                    self.open_dest(ui, DestMode::Upload { pending: request.paths }, None);
                 }
+                // Each folder opens the watch editor in turn, on the remembered
+                // destination; nothing is watched until its Save.
+                "watch" => self.watch_queue.extend(request.paths),
                 _ => {}
             }
+        }
+    }
+
+    /// Opens the next folder Finder asked to watch once the editor is free: after
+    /// a Save, the next one; after a Cancel, none of the rest.
+    fn next_queued_watch(&mut self, ui: &mut UiState) {
+        if ui.watch_editor.is_some() {
+            return;
+        }
+        if self.queued_editor {
+            self.queued_editor = false;
+            if !std::mem::take(&mut self.queued_saved) {
+                self.watch_queue.clear();
+                return;
+            }
+        }
+        let Some(local) = self.watch_queue.pop_front() else { return };
+        let mut editor = WatchEditor::creating(&ui.settings);
+        editor.local = local;
+        ui.watch_editor = Some(editor);
+        ui.view = View::Watch;
+        self.queued_editor = true;
+        self.focus = true;
+    }
+
+    /// The menu bar item, and the app menu's Check for Updates… and Quit.
+    fn on_menu(&mut self, tag: i32, ui: &mut UiState) {
+        match tag {
+            menubar::OPEN => self.focus = true,
+            menubar::REOPEN => {
+                if self.started.elapsed() > Duration::from_secs(3) {
+                    self.focus = true;
+                }
+            }
+            menubar::LINK => {
+                // The clipboard only if it holds a link: opening any copied URL
+                // could spend a one-time link.
+                let dir = self.app.settings().download_dir;
+                self.spawn_blocking(move |app, _tx| {
+                    let clip = app.clipboard_text();
+                    let link = if share::looks_like_link(&clip) { clip.trim().to_string() } else { String::new() };
+                    menubar::show_panel(&link, &dir);
+                });
+            }
+            menubar::LOGIN => self.handle(Request::SetOpenAtLogin(!ui.open_at_login), ui),
+            menubar::UPDATE | menubar::CHECK => {
+                // Settings shows the check as it runs, then the result.
+                self.focus = true;
+                ui.view = View::Settings;
+                if !self.app.update_status().available {
+                    self.handle(Request::CheckUpdate, ui);
+                }
+            }
+            menubar::QUIT => self.handle(Request::Quit, ui),
+            _ => {}
         }
     }
 
@@ -1173,6 +1533,22 @@ impl Drop for Gate {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
+}
+
+fn dest_node(n: Node) -> DestNode {
+    DestNode { id: n.id, name: n.name, kind: n.kind, folder_id: n.folder_id, where_: n.where_, remote: false }
+}
+
+fn dest_nodes(nodes: Vec<Node>) -> Vec<DestNode> {
+    nodes.into_iter().map(dest_node).collect()
+}
+
+fn dest_crumb(c: &PathCrumb) -> DestNode {
+    DestNode { id: c.id.clone(), name: c.name.clone(), kind: c.kind.clone(), folder_id: c.folder_id.clone(), ..Default::default() }
+}
+
+fn path_crumb(n: &DestNode) -> PathCrumb {
+    PathCrumb { id: n.id.clone(), name: n.name.clone(), kind: n.kind.clone(), folder_id: n.folder_id.clone() }
 }
 
 /// A message for the user, from a thread that cannot touch the window.

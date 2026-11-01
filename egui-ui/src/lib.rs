@@ -20,6 +20,8 @@ pub mod views;
 /// no app behind it, which is also why `fiotransfer-core` is a native-only
 /// dependency in `Cargo.toml`.
 #[cfg(not(target_arch = "wasm32"))]
+pub mod menubar;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod platform;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shell;

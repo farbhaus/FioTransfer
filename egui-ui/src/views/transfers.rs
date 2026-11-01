@@ -24,9 +24,8 @@
 //! Nothing here talks to Frame.io. A click becomes one [`Action`]; [`report`]
 //! turns it into one [`Request`] on `state.requests`, and the shell
 //! (`crate::shell`) hands that request to the real `App` — the same call the
-//! webview front end made through `window.go.main.App[...]`. The only toast this
-//! screen still raises is the one the destination chip has to give: the
-//! webview's destination modal has not been ported to this window yet.
+//! webview front end made through `window.go.main.App[...]`. The destination
+//! chip opens the destination picker (`crate::views::dest`).
 
 use std::sync::Arc;
 
@@ -37,7 +36,8 @@ use egui::{
 };
 
 use crate::model::{
-    FileView, JobView, LinkInfo, Request, ToastKind, UiState, View, fmt_bytes, fmt_dur, fmt_speed,
+    DestMode, FileView, JobView, LinkInfo, Request, UiState, View, fit_crumbs, fmt_bytes, fmt_dur,
+    fmt_speed,
 };
 use crate::model::Status;
 
@@ -465,9 +465,9 @@ pub enum Action {
     Paste,
     /// The download folder button (`PickDownloadDir`).
     PickDownloadDir,
-    /// `.dest-pick`: the upload destination. The webview's destination modal is
-    /// not ported to this window, so this one only says so.
-    ChooseDestination,
+    /// `.dest-pick`: open the destination picker at the level clicked — `-1` the
+    /// project glyph (the project list), `0…` a crumb, `None` the rest of it.
+    ChooseDestination(Option<i32>),
     /// `#cta-signin` in the composer (`login()`).
     SignIn,
     /// `#cta-setup`: the webview shows Settings, where the client id is typed.
@@ -867,6 +867,11 @@ fn dest_pick(ui: &mut Ui, rect: Rect, state: &UiState) -> Option<Action> {
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect();
+    // Where each crumb is, so a click opens the picker at that level.
+    let mut hit: Vec<(Rect, i32)> = Vec::new();
+    if !crumbs.is_empty() {
+        hit.push((icon.expand(4.0), -1));
+    }
     if crumbs.is_empty() {
         line_left(
             ui,
@@ -881,20 +886,29 @@ fn dest_pick(ui: &mut Ui, rect: Rect, state: &UiState) -> Option<Action> {
     } else {
         let painter = painter.with_clip_rect(area.intersect(painter.clip_rect()));
         let last = crumbs.len() - 1;
+        let (sep, dots) = (" / ", "…");
+        let (sep_w, dots_w) = (text_width(ui, sep, T_NOTE), text_width(ui, dots, T_NOTE));
+        let widths: Vec<f32> = crumbs.iter().map(|crumb| text_width(ui, crumb, T_NOTE)).collect();
+        // Too long for the chip: the middle goes, so the folder it ends at shows.
+        let shown = fit_crumbs(&widths, sep_w, dots_w, area.width());
         let mut x = area.left();
-        for (index, crumb) in crumbs.iter().enumerate() {
+        for (k, item) in shown.iter().enumerate() {
             if x >= area.right() {
                 break;
             }
-            if index > 0 {
-                let sep = " / ";
-                let w = text_width(ui, sep, T_NOTE);
+            if k > 0 {
                 line_left(ui, &painter, sep, T_NOTE, theme::TEXT_4, x, rect.center().y, area.right() - x);
-                x += w;
+                x += sep_w;
             }
+            let Some(index) = *item else {
+                line_left(ui, &painter, dots, T_NOTE, theme::TEXT_4, x, rect.center().y, area.right() - x);
+                x += dots_w;
+                continue;
+            };
             let color = if index == last { theme::TEXT } else { theme::TEXT_2 };
-            let w = text_width(ui, crumb, T_NOTE);
-            line_left(ui, &painter, crumb, T_NOTE, color, x, rect.center().y, area.right() - x);
+            let w = widths[index];
+            line_left(ui, &painter, crumbs[index], T_NOTE, color, x, rect.center().y, area.right() - x);
+            hit.push((Rect::from_min_max(pos2(x, rect.top()), pos2((x + w).min(area.right()), rect.bottom())), index as i32));
             x += w;
         }
     }
@@ -908,7 +922,10 @@ fn dest_pick(ui: &mut Ui, rect: Rect, state: &UiState) -> Option<Action> {
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &title));
     let resp = resp.on_hover_text(title);
     if resp.clicked() {
-        return Some(Action::ChooseDestination);
+        let at = resp
+            .interact_pointer_pos()
+            .and_then(|p| hit.iter().find(|(r, _)| r.contains(p)).map(|(_, level)| *level));
+        return Some(Action::ChooseDestination(at));
     }
     None
 }
@@ -1628,13 +1645,8 @@ fn report(state: &mut UiState, action: Action) {
         Action::Paste => state.ask(Request::Paste),
         Action::PickDownloadDir => state.ask(Request::PickDownloadDir),
         Action::SignIn => state.ask(Request::Login),
-        Action::ChooseDestination => {
-            // The webview's destination modal (`openDest`) has not been ported to
-            // this window: say that, rather than that the app is disconnected.
-            state.push_toast(
-                "Choosing a destination is not built in this window yet",
-                ToastKind::Info,
-            );
+        Action::ChooseDestination(at) => {
+            state.ask(Request::OpenDest { mode: DestMode::Upload { pending: Vec::new() }, at });
         }
     }
 }
@@ -2382,18 +2394,16 @@ mod tests {
     }
 
     #[test]
-    fn the_destination_chip_says_the_picker_is_not_built_here() {
+    fn the_destination_chip_opens_the_picker() {
         let mut harness = screen_harness(state_with(Vec::new(), Vec::new()));
         harness.get_by_label("Delivery / Reel 1").click_accesskit();
         harness.run();
-        // No request: the webview's destination modal is not in this window, and
-        // the toast says exactly that rather than that the app is disconnected.
-        assert!(harness.state().requests.is_empty());
-        assert_eq!(harness.state().toasts.len(), 1);
+        // An accessibility click has no pointer position: the whole destination.
         assert_eq!(
-            harness.state().toasts[0].text,
-            "Choosing a destination is not built in this window yet"
+            harness.state().requests,
+            vec![Request::OpenDest { mode: DestMode::Upload { pending: Vec::new() }, at: None }]
         );
+        assert!(harness.state().toasts.is_empty());
     }
 
     #[test]

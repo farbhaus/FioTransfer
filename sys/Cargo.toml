@@ -2,7 +2,7 @@
 name = "fiotransfer-sys"
 version = "0.1.0"
 edition = "2021"
-description = "The C boundary of FioTransfer: the libc calls the engine needs, behind safe functions"
+description = "The C boundary of FioTransfer: the AppKit shims in mac/ and the libc calls, behind safe functions"
 
 [lib]
 name = "fiotransfer_sys"
@@ -17,6 +17,9 @@ libc = "0.2"
 # `winit`), not a hand-copied struct.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[build-dependencies]
+cc = "1.10.0"
 
 [dev-dependencies]
 proptest = "1.12.0"
