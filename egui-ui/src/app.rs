@@ -60,6 +60,28 @@ pub const TOAST_MAX_WIDTH: f32 = theme::size::TOAST_MAX_W;
 /// `.toast::before { width: 7px; height: 7px; margin-top: 6px }`.
 pub const TOAST_DOT: f32 = theme::size::DOT;
 
+/// Whether the window's content runs up under a transparent title bar, the
+/// traffic lights over the sidebar, as the webview's `TitleBarHiddenInset`
+/// window did: macOS only. Other platforms keep their own title bar.
+pub const TITLE_BAR_OVER_CONTENT: bool = cfg!(target_os = "macos");
+
+/// `--wails-draggable: drag`. With the title bar over the content, the strips
+/// the webview made draggable — the sidebar's top and brand, every page head —
+/// move the window: a drag moves it, a double-click zooms it. Called before the
+/// strip's own widgets, so a button on it keeps its click.
+pub fn window_drag(ui: &egui::Ui, rect: Rect, id: Id) {
+    if !TITLE_BAR_OVER_CONTENT {
+        return;
+    }
+    let response = ui.interact(rect, id, Sense::click_and_drag());
+    if response.double_clicked() {
+        let zoomed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!zoomed));
+    } else if response.drag_started_by(egui::PointerButton::Primary) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+}
+
 /// The window, with the state every screen draws from.
 pub struct FioApp {
     pub state: UiState,
@@ -246,15 +268,22 @@ pub fn show_screen(ui: &mut egui::Ui, state: &mut UiState) {
 ///
 /// Returns the strip's rect, which is how the tests hold it to 64 px.
 pub fn page_head(ui: &mut egui::Ui, title: &str, actions: impl FnOnce(&mut egui::Ui)) -> Rect {
+    // `.page-head { --wails-draggable: drag }`; its buttons come after, on top.
+    let strip = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), PAGE_HEAD_HEIGHT));
+    window_drag(ui, strip, Id::new("fio-page-head-drag"));
     ui.allocate_ui_with_layout(
         vec2(ui.available_width(), PAGE_HEAD_HEIGHT),
         Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.label(
-                RichText::new(title)
-                    .font(theme::title())
-                    .strong()
-                    .color(theme::TEXT),
+            // Not selectable: a drag on the title moves the window.
+            ui.add(
+                Label::new(
+                    RichText::new(title)
+                        .font(theme::title())
+                        .strong()
+                        .color(theme::TEXT),
+                )
+                .selectable(false),
             );
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = theme::space::M;

@@ -23,7 +23,7 @@
 
 #![forbid(unsafe_code)]
 
-use fiotransfer_egui::app::apply_style_once;
+use fiotransfer_egui::app::{apply_style_once, TITLE_BAR_OVER_CONTENT};
 use fiotransfer_egui::model::{Snapshot, UiState, View};
 use fiotransfer_egui::{FioApp, Shell, MIN_HEIGHT, MIN_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH};
 
@@ -41,6 +41,11 @@ fn main() -> eframe::Result<()> {
         .with_title("FioTransfer")
         // Open at login starts the app in the menu bar, without the window.
         .with_visible(!launch.hidden);
+    if TITLE_BAR_OVER_CONTENT {
+        // The webview's `TitleBarHiddenInset`: no grey bar, the sidebar and the
+        // page run to the top, the traffic lights over the sidebar's top strip.
+        viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
+    }
     // Without an icon eframe sets its own "e" logo, and on macOS it puts that on
     // the Dock over the bundle's .icns.
     if let Ok(icon) = app_icon() {

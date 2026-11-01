@@ -2522,4 +2522,88 @@ mod tests {
         harness.snapshot("watch_duplex");
     }
 
+
+    // ---------- the page head moves the window (title bar over the content) ----------
+
+    /// The viewport commands sent over the next `frames` frames.
+    fn window_commands(harness: &mut Harness<'static, UiState>, frames: usize) -> Vec<egui::ViewportCommand> {
+        let mut sent = Vec::new();
+        for _ in 0..frames {
+            harness.step();
+            if let Some(out) = harness.output().viewport_output.get(&egui::ViewportId::ROOT) {
+                sent.extend(out.commands.iter().cloned());
+            }
+        }
+        sent
+    }
+
+    fn press(harness: &Harness<'static, UiState>, pos: egui::Pos2, pressed: bool) {
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn dragging_the_page_head_moves_the_window() {
+        let mut harness = screen_harness(state_with(Vec::new()));
+        harness.run();
+        let at = harness.get_by_label("Watch Folders").rect().center();
+        harness.hover_at(at);
+        press(&harness, at, true);
+        let mut sent = window_commands(&mut harness, 1);
+        harness.hover_at(at + vec2(40.0, 0.0));
+        sent.extend(window_commands(&mut harness, 3));
+        press(&harness, at + vec2(40.0, 0.0), false);
+        harness.run();
+        let drags = sent.iter().filter(|c| matches!(c, egui::ViewportCommand::StartDrag)).count();
+        assert_eq!(drags, usize::from(crate::app::TITLE_BAR_OVER_CONTENT), "{sent:?}");
+    }
+
+    #[test]
+    fn double_clicking_the_page_head_zooms_the_window() {
+        // 60 frames a second: kittest's default 0.25 s step puts two clicks
+        // further apart than egui's 0.3 s double-click.
+        let mut harness = Harness::builder()
+            .with_size(vec2(956.0, 780.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_state(
+                |ctx, state: &mut UiState| {
+                    crate::app::apply_style_once(ctx);
+                    egui::CentralPanel::default().show(ctx, |ui| show(ui, state));
+                },
+                state_with(Vec::new()),
+            );
+        harness.run();
+        let at = harness.get_by_label("Watch Folders").rect().center();
+        harness.hover_at(at);
+        let mut sent = Vec::new();
+        for _ in 0..2 {
+            press(&harness, at, true);
+            press(&harness, at, false);
+            sent.extend(window_commands(&mut harness, 1));
+        }
+        let zooms = sent.iter().filter(|c| matches!(c, egui::ViewportCommand::Maximized(true))).count();
+        assert_eq!(zooms, usize::from(crate::app::TITLE_BAR_OVER_CONTENT), "{sent:?}");
+    }
+
+    /// A button on the page head keeps its click, and moves nothing.
+    #[test]
+    fn a_button_on_the_page_head_keeps_its_click() {
+        let mut harness = screen_harness(state_with(Vec::new()));
+        harness.run();
+        let at = harness.get_by_label("Add").rect().center();
+        harness.hover_at(at);
+        press(&harness, at, true);
+        press(&harness, at, false);
+        let sent = window_commands(&mut harness, 2);
+        harness.run();
+        assert!(harness.state().watch_editor.is_some(), "Add opened the editor");
+        assert!(
+            !sent.iter().any(|c| matches!(c, egui::ViewportCommand::StartDrag | egui::ViewportCommand::Maximized(_))),
+            "{sent:?}"
+        );
+    }
 }

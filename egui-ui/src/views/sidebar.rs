@@ -267,7 +267,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut UiState) {
     // block and the gap above it.
     let account_row_h = if state.logged_in { WHO_H.max(AVATAR) } else { BTN_H };
     let l = layout_with(rect, account_row_h);
-    let _ = l.traffic; // the traffic-light spacer: the webview's buttons sit there.
+    // `.traffic` (the window's buttons sit there) and `.brand` move the window.
+    let top = Rect::from_min_max(rect.min, pos2(rect.right(), l.brand.bottom()));
+    crate::app::window_drag(ui, top, ui.id().with("window-drag"));
 
     brand(&painter, &l);
     nav(ui, &painter, &l, state);
@@ -1009,5 +1011,46 @@ mod tests {
         // says where the sign-in stands.
         assert_eq!(harness.state().requests, vec![Request::Login]);
         assert!(harness.state().toasts.is_empty());
+    }
+
+    /// `.traffic` and `.brand` move the window; the nav under them doesn't.
+    #[test]
+    fn the_sidebar_top_moves_the_window_and_the_nav_does_not() {
+        fn sent_by_drag(harness: &mut Harness<'static, UiState>, at: Pos2) -> Vec<egui::ViewportCommand> {
+            let press = |pressed: bool, pos: Pos2| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let mut sent = Vec::new();
+            let mut frame = |h: &mut Harness<'static, UiState>| {
+                h.step();
+                if let Some(out) = h.output().viewport_output.get(&egui::ViewportId::ROOT) {
+                    sent.extend(out.commands.iter().cloned());
+                }
+            };
+            harness.hover_at(at);
+            harness.event(press(true, at));
+            frame(harness);
+            harness.hover_at(at + vec2(40.0, 0.0));
+            for _ in 0..3 {
+                frame(harness);
+            }
+            harness.event(press(false, at + vec2(40.0, 0.0)));
+            frame(harness);
+            sent
+        }
+        let l = layout(Rect::from_min_size(Pos2::ZERO, vec2(WIDTH, PANEL_H)));
+        let mut harness = harness(UiState::default());
+        harness.run();
+
+        for at in [l.traffic.center(), l.brand.center()] {
+            let sent = sent_by_drag(&mut harness, at);
+            let drags = sent.iter().filter(|c| matches!(c, egui::ViewportCommand::StartDrag)).count();
+            assert_eq!(drags, usize::from(crate::app::TITLE_BAR_OVER_CONTENT), "at {at:?}: {sent:?}");
+        }
+        let sent = sent_by_drag(&mut harness, l.nav_items[0].center());
+        assert!(!sent.iter().any(|c| matches!(c, egui::ViewportCommand::StartDrag)), "{sent:?}");
     }
 }
