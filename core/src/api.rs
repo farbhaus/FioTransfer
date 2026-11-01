@@ -539,13 +539,10 @@ impl Client {
     /// user may not download it, or Frame.io hasn't finished processing the
     /// upload yet.
     pub async fn download_url(&self, cx: &CancellationToken, acct: &str, file: &str) -> Result<String, ApiErr> {
-        #[derive(Deserialize)]
-        struct R {
-            data: D,
-        }
+        // `data` already takes off the `{"data": …}` envelope: D is the file itself.
         #[derive(Deserialize)]
         struct D {
-            #[serde(default)]
+            #[serde(default, deserialize_with = "null_as_absent")]
             media_links: ML,
         }
         #[derive(Deserialize, Default)]
@@ -558,7 +555,7 @@ impl Client {
             #[serde(default)]
             download_url: Option<String>,
         }
-        let r: R = self
+        let f: D = self
             .data(
                 cx,
                 "GET",
@@ -567,7 +564,7 @@ impl Client {
                 None,
             )
             .await?;
-        match r.data.media_links.original.and_then(|o| o.download_url) {
+        match f.media_links.original.and_then(|o| o.download_url) {
             Some(u) if !u.is_empty() => Ok(u),
             _ => Err(ApiErr::Other(ERR_NO_ORIGINAL.into())),
         }
@@ -943,5 +940,89 @@ mod tests {
         assert!(bad.is_err(), "a list where a string belongs still fails");
         let bad: Result<Asset, _> = serde_json::from_str(r#"{"file_size": "12"}"#);
         assert!(bad.is_err(), "a string where a number belongs still fails");
+    }
+
+    // ---------- download_url, against a stub Frame.io ----------
+
+    /// Serves `GET /v4/accounts/{a}/files/{id}` with `{"data": <file>}`, the file
+    /// picked by its id. Each answer closes its connection. Returns the base URL
+    /// and the request lines it saw.
+    async fn stub_files(files: Vec<(&'static str, &'static str)>) -> (String, Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut c, _)) = l.accept().await {
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match c.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => req.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let line = String::from_utf8_lossy(&req).lines().next().unwrap_or("").to_string();
+                log.lock().unwrap().push(line.clone());
+                let path = line.split(' ').nth(1).unwrap_or("");
+                let id = path.split('?').next().unwrap_or("").rsplit('/').next().unwrap_or("");
+                let resp = match files.iter().find(|(f, _)| *f == id) {
+                    Some((_, file)) => {
+                        let body = format!(r#"{{"data":{}}}"#, file);
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    }
+                    None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                };
+                let _ = c.write_all(resp.as_bytes()).await;
+                let _ = c.shutdown().await;
+            }
+        });
+        (base, seen)
+    }
+
+    /// The port decoded the `{"data": …}` envelope twice, so every own-account
+    /// download (all download watches) failed with "missing field `data`".
+    #[tokio::test]
+    async fn download_url_reads_the_original_from_the_file() {
+        let (base, seen) = stub_files(vec![(
+            "f1",
+            r#"{"id":"f1","name":"a.mp4","type":"file","file_size":971373568,"status":"uploaded",
+                "media_links":{"original":{"download_url":"https://assets.frame.io/a.mp4?sig=1"}}}"#,
+        )])
+        .await;
+        let mut c = Client::new(AuthManager::new_static("test-token"));
+        c.base_url = base;
+        let url = c.download_url(&CancellationToken::new(), "acct", "f1").await.expect("a download URL");
+        assert_eq!(url, "https://assets.frame.io/a.mp4?sig=1");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        let line = percent_encoding::percent_decode_str(&seen[0]).decode_utf8_lossy().into_owned();
+        assert!(line.starts_with("GET /v4/accounts/acct/files/f1?include=media_links.original "), "{:?}", line);
+    }
+
+    /// No original on offer (watermarked, downloads off), however Frame.io says
+    /// it: the error the engine knows, not a decode error.
+    #[tokio::test]
+    async fn download_url_without_an_original_says_so() {
+        let (base, _) = stub_files(vec![
+            ("url-null", r#"{"id":"url-null","media_links":{"original":{"download_url":null}}}"#),
+            ("orig-null", r#"{"id":"orig-null","media_links":{"original":null}}"#),
+            ("links-null", r#"{"id":"links-null","media_links":null}"#),
+            ("no-links", r#"{"id":"no-links"}"#),
+        ])
+        .await;
+        let mut c = Client::new(AuthManager::new_static("test-token"));
+        c.base_url = base;
+        for id in ["url-null", "orig-null", "links-null", "no-links"] {
+            match c.download_url(&CancellationToken::new(), "acct", id).await {
+                Err(ApiErr::Other(e)) => assert_eq!(e, ERR_NO_ORIGINAL, "{}", id),
+                other => panic!("{}: {:?}", id, other.map_err(|e| e.to_string())),
+            }
+        }
     }
 }
