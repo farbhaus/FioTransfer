@@ -299,6 +299,31 @@ fn a_tall_screen_scrolls_instead_of_widening() {
     assert!(drawn > 100, "only {drawn} columns of the screen reached the last row");
 }
 
+/// Every glyph the screens' own words use is in a face the app ships: a missing
+/// one draws as an empty box ("f.io/9f2c1a ☐ /Users/…" before the arrow had one).
+#[test]
+fn the_screens_glyphs_all_have_a_face() {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(WINDOW_WIDTH, WINDOW_HEIGHT))
+        .build_state(
+            |ctx, app: &mut FioApp| app.draw(ctx),
+            FioApp::new(fixture_state(View::Transfers)),
+        );
+    harness.run_steps(1);
+    for c in ['→', '›', '…', '—', '·'] {
+        for font in [
+            egui::FontId::proportional(13.0),
+            egui::FontId::new(13.0, egui::FontFamily::Name("medium".into())),
+            egui::FontId::new(13.0, egui::FontFamily::Name("semibold".into())),
+        ] {
+            assert!(
+                harness.ctx.fonts_mut(|fonts| fonts.has_glyph(&font, c)),
+                "{c:?} has no glyph in {font:?}"
+            );
+        }
+    }
+}
+
 /// The shell draws with Inter, the stylesheet's face, not egui's default face.
 /// Measured by laying the same string out in a shell context and in a bare one:
 /// the two faces give different advance widths, so the numbers must differ.

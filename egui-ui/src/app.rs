@@ -318,11 +318,12 @@ fn install_fonts(ctx: &egui::Context) {
         list.push("NotoEmoji-Regular".to_owned());
         list.push("emoji-icon-font".to_owned());
     }
-    fonts
-        .families
-        .entry(egui::FontFamily::Proportional)
-        .or_default()
-        .insert(0, "inter".to_owned());
+    // The variable face has no "→" (U+2192), and nor do egui's defaults, so it
+    // drew as an empty box in a download's "link → folder" line. The medium
+    // instance has it: the arrow comes from Inter rather than from no font.
+    let proportional = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+    proportional.insert(0, "inter".to_owned());
+    proportional.insert(1, "inter-medium".to_owned());
     fonts
         .families
         .entry(egui::FontFamily::Monospace)
