@@ -210,8 +210,7 @@ async fn main() {
             std::process::exit(code);
         }
         "history" => {
-            let (_, n) = flags_and_positional(args, &["-n"]);
-            let limit: i64 = n.parse().unwrap_or(20);
+            let limit = history_limit(args);
             let h = match history::Store::open(&config::dir(), &config::log_dir()) {
                 Ok(h) => h,
                 Err(e) => fatal(&e),
@@ -823,6 +822,12 @@ fn range_check(flag: &str, v: i64, lo: i64, hi: i64) -> Result<(), String> {
 }
 
 /// Keeps the flags the command understands, and the single positional argument.
+/// `fio history -n N`: how many rows, 20 when not given.
+fn history_limit(args: &[String]) -> i64 {
+    let (n, _) = flags_and_positional(args, &["-n"]);
+    n.parse().unwrap_or(20)
+}
+
 fn flags_and_positional(args: &[String], flags: &[&str]) -> (String, String) {
     let mut flag_vals: Vec<String> = Vec::new();
     let mut pos: Vec<String> = Vec::new();
@@ -1035,6 +1040,14 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn history_takes_the_row_count_from_n() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(history_limit(&args(&["-n", "5"])), 5);
+        assert_eq!(history_limit(&args(&[])), 20);
+        assert_eq!(history_limit(&args(&["-n", "lots"])), 20);
+    }
 
     // ---------- the reference models ----------
     //
