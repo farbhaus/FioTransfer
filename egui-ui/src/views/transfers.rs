@@ -31,10 +31,11 @@ use std::sync::Arc;
 
 use egui::{
     Align, Button, Checkbox, Color32, CornerRadius, FontId, Frame, Galley, Id, Label, Layout, Margin,
-    Painter, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextWrapMode, Ui,
+    Painter, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextWrapMode, Ui,
     UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 
+use crate::icons::{self, Icon};
 use crate::model::{
     DestMode, FileView, JobView, LinkInfo, Request, UiState, View, fit_crumbs, fmt_bytes, fmt_dur,
     fmt_speed,
@@ -851,10 +852,10 @@ fn dest_pick(ui: &mut Ui, rect: Rect, state: &UiState) -> Option<Action> {
     painter.rect_stroke(rect, theme::R_S, theme::stroke_border_2(), StrokeKind::Inside);
 
     let icon = Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(16.0, 16.0));
-    draw_project(&painter, icon, theme::TEXT_3);
+    icons::paint(&painter, icon.center(), theme::icon::CONTROL, Icon::Project, theme::TEXT_3);
 
     let chevron = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), vec2(10.0, 10.0));
-    draw_chevron(&painter, chevron, theme::TEXT_3, false);
+    icons::paint(&painter, chevron.center(), theme::icon::CONTROL, Icon::ChevronDown, theme::TEXT_3);
 
     // `.dest-pick .path`: segments, `/` separators, the last one brightest.
     let area = Rect::from_min_max(
@@ -1028,8 +1029,8 @@ fn link_field(ui: &mut Ui, rect: Rect, composer: &mut Composer) -> egui::Respons
     });
     let rect = response.response.rect;
     let painter = ui.painter().clone();
-    let icon = Rect::from_center_size(pos2(rect.left() + 17.0, rect.center().y), vec2(16.0, 16.0));
-    draw_link(&painter, icon, theme::TEXT_3);
+    let icon = pos2(rect.left() + 17.0, rect.center().y);
+    icons::paint(&painter, icon, theme::icon::CONTROL, Icon::Link, theme::TEXT_3);
 
     // `.input-btn { position: absolute; right: 4px; height: 24px }`
     let paste = "Paste";
@@ -1074,19 +1075,23 @@ fn dir_button(ui: &mut Ui, rect: Rect, label: &str, state: &UiState) -> egui::Re
             tight(ui);
             ui.put(
                 rect,
-                Button::new(RichText::new(label).size(T_BODY).color(theme::TEXT_BODY))
+                Button::new("")
                     .fill(fill)
                     .stroke(theme::stroke_border_2())
                     .corner_radius(theme::R_S)
-                    .min_size(rect.size())
-                    .wrap_mode(TextWrapMode::Truncate),
+                    .min_size(rect.size()),
             )
         })
         .inner;
-    // The glyph is painted over the button's own left padding.
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
+    // `.btn { padding: 0 12px; gap: 7px }`: the glyph, then the name after it,
+    // never under it.
     let painter = ui.painter().clone();
-    let icon = Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(16.0, 16.0));
-    draw_folder(&painter, icon, theme::TEXT_2);
+    let glyph = theme::icon::CONTROL;
+    icons::paint(&painter, pos2(rect.left() + 12.0 + glyph / 2.0, rect.center().y), glyph, Icon::Folder, theme::TEXT_2);
+    let text_left = rect.left() + 12.0 + glyph + 7.0;
+    let name = truncated(ui, label, T_BODY, theme::TEXT_BODY, rect.right() - 12.0 - text_left);
+    painter.galley(pos2(text_left, rect.center().y - name.size().y / 2.0), name, theme::TEXT_BODY);
     let save_to = download_dir(state);
     resp.on_hover_text(if save_to.is_empty() { "Save to Downloads".to_string() } else { format!("Save to {save_to}") })
 }
@@ -1305,7 +1310,8 @@ fn name_cell(ui: &Ui, painter: &Painter, rect: Rect, job: &JobView, title: &str)
         Stroke::new(1.0_f32, theme::BORDER),
         StrokeKind::Inside,
     );
-    draw_arrow(painter, icon.center(), job.is_upload(), theme::TEXT_2);
+    let arrow = if job.is_upload() { Icon::Up } else { Icon::Down };
+    icons::paint(painter, icon.center(), theme::icon::CONTROL, arrow, theme::TEXT_2);
 
     let text_left = icon.right() + 12.0;
     let text_w = (rect.right() - text_left).max(0.0);
@@ -1455,15 +1461,16 @@ fn icon_button(ui: &mut Ui, id: Id, rect: Rect, glyph: Glyph, title: &str) -> eg
         painter.rect_filled(rect, theme::R_S, theme::HOVER);
     }
     let color = if resp.hovered() { theme::TEXT } else { theme::TEXT_3 };
-    let area = Rect::from_center_size(rect.center(), vec2(16.0, 16.0));
-    match glyph {
-        Glyph::Open => draw_open(&painter, area, color),
-        Glyph::Copy => draw_copy(&painter, area, color),
-        Glyph::Reveal => draw_folder(&painter, area, color),
-        Glyph::Retry => draw_retry(&painter, area, color),
-        Glyph::Cancel => draw_cancel(&painter, area, color),
-        Glyph::ChevronUp(down) => draw_chevron(&painter, area, color, !down),
-    }
+    let icon = match glyph {
+        Glyph::Open => Icon::Open,
+        Glyph::Copy => Icon::Copy,
+        Glyph::Reveal => Icon::Folder,
+        Glyph::Retry => Icon::Retry,
+        Glyph::Cancel => Icon::Close,
+        Glyph::ChevronUp(true) => Icon::ChevronDown,
+        Glyph::ChevronUp(false) => Icon::ChevronUp,
+    };
+    icons::paint(&painter, rect.center(), theme::icon::CONTROL, icon, color);
     resp.on_hover_text(title.to_string())
 }
 
@@ -1486,7 +1493,8 @@ fn empty_state(ui: &mut Ui) {
                 Stroke::new(1.0_f32, theme::BORDER),
                 StrokeKind::Inside,
             );
-            draw_sync_glyph(&painter, icon, theme::TEXT_3);
+            // `#jobs-empty .empty-icon`: the sync mark at `stroke-width="1.4"`.
+            icons::paint_width(&painter, icon.center(), theme::icon::EMPTY, Icon::Sync, theme::TEXT_3, 1.4);
             ui.add_space(14.0); // `.empty-icon { margin: 0 auto 14px }`
             ui.add(Label::new(RichText::new("No transfers").size(T_SECTION).color(theme::TEXT)));
         },
@@ -1685,140 +1693,6 @@ fn line_right(ui: &Ui, painter: &Painter, text: &str, size: f32, color: Color32,
     let g = truncated(ui, text, size, color, width);
     let (w, h) = (g.size().x, g.size().y);
     painter.galley(pos2(right - w, cy - h / 2.0), g, color);
-}
-
-/// The `↑` / `↓` of `.kind-icon`, drawn rather than typed so no glyph can be missing.
-fn draw_arrow(painter: &Painter, centre: egui::Pos2, up: bool, color: Color32) {
-    let stroke = Stroke::new(1.5_f32, color);
-    let (tail, head) = if up {
-        (pos2(centre.x, centre.y + 5.5), pos2(centre.x, centre.y - 5.5))
-    } else {
-        (pos2(centre.x, centre.y - 5.5), pos2(centre.x, centre.y + 5.5))
-    };
-    painter.line_segment([tail, head], stroke);
-    let dy = head.y - tail.y;
-    let sign = if dy < 0.0 { 1.0 } else { -1.0 };
-    painter.line_segment([head, pos2(head.x - 4.5, head.y + sign * 4.5)], stroke);
-    painter.line_segment([head, pos2(head.x + 4.5, head.y + sign * 4.5)], stroke);
-}
-
-/// The chevron of `.dest-pick .chev` and `.a-files`.
-fn draw_chevron(painter: &Painter, rect: Rect, color: Color32, up: bool) {
-    let stroke = Stroke::new(1.5_f32, color);
-    let (l, r, y) = (rect.left(), rect.right(), rect.center().y);
-    let mid = rect.center().x;
-    let sign = if up { 1.0 } else { -1.0 };
-    painter.line_segment([pos2(l, y - sign * 1.5), pos2(mid, y + sign * 1.5)], stroke);
-    painter.line_segment([pos2(mid, y + sign * 1.5), pos2(r, y - sign * 1.5)], stroke);
-}
-
-/// The folder glyph of `#dl-dest` and `.a-reveal`.
-fn draw_folder(painter: &Painter, rect: Rect, color: Color32) {
-    let body = Rect::from_min_max(pos2(rect.left(), rect.top() + 2.5), pos2(rect.right(), rect.bottom() - 1.5));
-    painter.rect_stroke(body, theme::R_TRACK, Stroke::new(1.4_f32, color), StrokeKind::Middle);
-    let tab = egui::Rect::from_min_max(
-        pos2(body.left() + 1.0, body.top()),
-        pos2(body.left() + 6.0, body.top() - 1.5),
-    );
-    painter.line_segment([pos2(tab.left(), tab.bottom()), pos2(tab.left(), tab.top())], Stroke::new(1.4_f32, color));
-    painter.line_segment([pos2(tab.left(), tab.top()), pos2(tab.right(), tab.top())], Stroke::new(1.4_f32, color));
-    painter.line_segment([pos2(tab.right(), tab.top()), pos2(tab.right() + 1.0, body.top())], Stroke::new(1.4_f32, color));
-}
-
-/// `I.open` — the box with the arrow leaving it.
-fn draw_open(painter: &Painter, rect: Rect, color: Color32) {
-    let s = rect.width() / 20.0;
-    let at = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    let stroke = Stroke::new(1.5_f32, color);
-    // `M8 5H5.5A1.5 1.5 0 0 0 4 6.5v8A1.5 1.5 0 0 0 5.5 16h8a1.5 1.5 0 0 0 1.5-1.5V12`
-    painter.line_segment([at(8.0, 5.0), at(5.5, 5.0)], stroke);
-    svg_arc(painter, at(5.5, 6.5), 1.5 * s, -90.0, -180.0, stroke);
-    painter.line_segment([at(4.0, 6.5), at(4.0, 14.5)], stroke);
-    svg_arc(painter, at(5.5, 14.5), 1.5 * s, 180.0, 90.0, stroke);
-    painter.line_segment([at(5.5, 16.0), at(13.5, 16.0)], stroke);
-    svg_arc(painter, at(13.5, 14.5), 1.5 * s, 90.0, 0.0, stroke);
-    painter.line_segment([at(15.0, 14.5), at(15.0, 12.0)], stroke);
-    // `M11 4h5v5M16 4l-7 7`
-    painter.line_segment([at(11.0, 4.0), at(16.0, 4.0)], stroke);
-    painter.line_segment([at(16.0, 4.0), at(16.0, 9.0)], stroke);
-    painter.line_segment([at(16.0, 4.0), at(9.0, 11.0)], stroke);
-}
-
-/// `I.copy` — two overlapping rounded squares.
-fn draw_copy(painter: &Painter, rect: Rect, color: Color32) {
-    let s = rect.width() / 20.0;
-    let at = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    let stroke = Stroke::new(1.4_f32, color);
-    let front = Rect::from_min_max(at(7.0, 7.0), at(16.0, 16.0));
-    painter.rect_stroke(front, CornerRadius::same(1), stroke, StrokeKind::Middle);
-    painter.line_segment([at(13.0, 7.0), at(13.0, 5.5)], stroke);
-    svg_arc(painter, at(11.5, 5.5), 1.5 * s, 0.0, -90.0, stroke);
-    painter.line_segment([at(11.5, 4.0), at(5.5, 4.0)], stroke);
-    svg_arc(painter, at(5.5, 5.5), 1.5 * s, -90.0, -180.0, stroke);
-    painter.line_segment([at(4.0, 5.5), at(4.0, 11.5)], stroke);
-    svg_arc(painter, at(5.5, 11.5), 1.5 * s, 180.0, 90.0, stroke);
-    painter.line_segment([at(5.5, 13.0), at(7.0, 13.0)], stroke);
-}
-
-/// `I.retry` — an open circle with an arrow head, the way `app.js` draws it.
-fn draw_retry(painter: &Painter, rect: Rect, color: Color32) {
-    let s = rect.width() / 20.0;
-    let at = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    let stroke = Stroke::new(1.5_f32, color);
-    svg_arc(painter, at(10.0, 10.0), 5.5 * s, 0.0, 315.0, stroke);
-    painter.line_segment([at(15.5, 4.0), at(15.5, 7.4)], stroke);
-    painter.line_segment([at(15.5, 4.0), at(12.1, 4.0)], stroke);
-}
-
-/// `I.x` — the Cancel cross.
-fn draw_cancel(painter: &Painter, rect: Rect, color: Color32) {
-    let s = rect.width() / 20.0;
-    let at = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    let stroke = Stroke::new(1.5_f32, color);
-    painter.line_segment([at(6.0, 6.0), at(14.0, 14.0)], stroke);
-    painter.line_segment([at(14.0, 6.0), at(6.0, 14.0)], stroke);
-}
-
-/// The window glyph of `.dest-pick .seg.root` (`.dest-pick svg`).
-fn draw_project(painter: &Painter, rect: Rect, color: Color32) {
-    let s = rect.width() / 20.0;
-    let at = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    let stroke = Stroke::new(1.4_f32, color);
-    let body = Rect::from_min_max(at(3.0, 4.0), at(17.0, 16.0));
-    painter.rect_stroke(body, CornerRadius::same(2), stroke, StrokeKind::Middle);
-    painter.line_segment([at(3.0, 8.0), at(17.0, 8.0)], stroke);
-}
-
-/// The chain glyph of `.input-icon` in the link field, from the same SVG path
-/// `index.html` uses (`M8.5 11.5l3-3M7.2 9.3l-1.6 1.6a2.6…`).
-fn draw_link(painter: &Painter, rect: Rect, color: Color32) {
-    let stroke = Stroke::new(1.5_f32, color);
-    let s = rect.width() / 20.0;
-    let at = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    painter.line_segment([at(8.5, 11.5), at(11.5, 8.5)], stroke);
-    svg_arc(painter, at(7.45, 12.75), 2.62 * s, -135.0, -315.0, stroke);
-    svg_arc(painter, at(12.55, 7.25), 2.62 * s, 45.0, -135.0, stroke);
-}
-
-/// A circle arc sampled as a polyline, in the SVG's y-down coordinates.
-fn svg_arc(painter: &Painter, centre: Pos2, radius: f32, from_deg: f32, to_deg: f32, stroke: Stroke) {
-    const STEPS: usize = 12;
-    let points: Vec<Pos2> = (0..=STEPS)
-        .map(|i| {
-            let turn = from_deg + (to_deg - from_deg) * (i as f32 / STEPS as f32);
-            let angle = turn.to_radians();
-            pos2(centre.x + radius * angle.cos(), centre.y + radius * angle.sin())
-        })
-        .collect();
-    painter.add(egui::Shape::line(points, stroke));
-}
-
-/// The up-and-down glyph of `#jobs-empty`.
-fn draw_sync_glyph(painter: &Painter, rect: Rect, color: Color32) {
-    let up = Rect::from_center_size(pos2(rect.center().x - 5.0, rect.center().y), vec2(12.0, 20.0));
-    let down = Rect::from_center_size(pos2(rect.center().x + 6.0, rect.center().y), vec2(12.0, 20.0));
-    draw_arrow(painter, up.center(), true, color);
-    draw_arrow(painter, down.center(), false, color);
 }
 
 // ---------- tests ----------

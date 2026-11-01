@@ -27,6 +27,7 @@
 //! The shell (`crate::app`) supplies the `.view` padding, the scroll area and
 //! the page head; the tokens come from [`crate::theme`].
 
+use crate::icons::{self, Icon};
 use crate::model::{
     fit_crumbs, watch_blocks, DestMode, Lane, Request, UiState, WatchEditor, WatchRow, DIRECTION_DOWNLOAD,
     DIRECTION_MIRROR, DIRECTION_UPLOAD, ON_CHANGE_KEEP, ON_CHANGE_OVERWRITE,
@@ -34,7 +35,7 @@ use crate::model::{
 use crate::theme;
 use egui::{
     Align, Checkbox, Color32, CornerRadius, Id, Label, Layout, Margin, Painter, Rect, RichText,
-    Sense, Shape, Stroke, StrokeKind, TextEdit, WidgetInfo, WidgetType, pos2, vec2,
+    Sense, Stroke, StrokeKind, TextEdit, WidgetInfo, WidgetType, pos2, vec2,
 };
 
 /// The sidebar's width: the stylesheet's media queries are about the *window*,
@@ -1338,126 +1339,21 @@ impl Glyph {
     }
 }
 
-/// Paint `glyph` inside `rect`, on a canvas `size` px tall.
+/// Paint `glyph` at `rect`'s centre, `size` px square. Show in Finder is the
+/// folder, as `I.reveal` is in app.js.
 fn paint(painter: &Painter, rect: Rect, glyph: Glyph, colour: Color32, size: f32) {
-    let c = rect.center();
-    let s = size * 0.5;
-    let stroke = Stroke::new(1.4_f32, colour);
-    match glyph {
-        Glyph::Folder => {
-            // A tab on the left shoulder, then the body.
-            let body = Rect::from_center_size(c, vec2(s * 1.8, s * 1.4));
-            let tab = Rect::from_min_size(
-                pos2(body.left(), body.top() - s * 0.35),
-                vec2(s * 0.8, s * 0.35),
-            );
-            painter.rect_stroke(body, CornerRadius::same(2), stroke, StrokeKind::Inside);
-            painter.line_segment([tab.left_bottom(), tab.left_top()], stroke);
-            painter.line_segment([tab.left_top(), tab.right_top()], stroke);
-            painter.line_segment([tab.right_top(), tab.right_bottom()], stroke);
-        }
-        Glyph::Up | Glyph::Down => {
-            let dir = if glyph == Glyph::Up { -1.0 } else { 1.0 };
-            let tip = pos2(c.x, c.y + dir * s * 0.9);
-            let tail = pos2(c.x, c.y - dir * s * 0.9);
-            painter.line_segment([tail, tip], stroke);
-            let wing = s * 0.45;
-            painter.line_segment(
-                [pos2(tip.x - wing, tip.y - dir * wing), tip],
-                stroke,
-            );
-            painter.line_segment(
-                [pos2(tip.x + wing, tip.y - dir * wing), tip],
-                stroke,
-            );
-        }
-        Glyph::Sync => {
-            // Two arrows, one each way.
-            let y = s * 0.45;
-            painter.line_segment([pos2(c.x - s * 0.9, c.y - y), pos2(c.x + s * 0.9, c.y - y)], stroke);
-            painter.line_segment([pos2(c.x + s * 0.9, c.y + y), pos2(c.x - s * 0.9, c.y + y)], stroke);
-            let w = s * 0.4;
-            painter.line_segment(
-                [pos2(c.x + s * 0.9 - w, c.y - y - w), pos2(c.x + s * 0.9, c.y - y)],
-                stroke,
-            );
-            painter.line_segment(
-                [pos2(c.x - s * 0.9 + w, c.y + y + w), pos2(c.x - s * 0.9, c.y + y)],
-                stroke,
-            );
-        }
-        Glyph::Pause => {
-            let y = s * 0.6;
-            for x in [-s * 0.3, s * 0.3] {
-                painter.line_segment([pos2(c.x + x, c.y - y), pos2(c.x + x, c.y + y)], stroke);
-            }
-        }
-        Glyph::Play => {
-            let shape = Shape::convex_polygon(
-                vec![
-                    pos2(c.x - s * 0.35, c.y - s * 0.6),
-                    pos2(c.x - s * 0.35, c.y + s * 0.6),
-                    pos2(c.x + s * 0.55, c.y),
-                ],
-                colour,
-                Stroke::NONE,
-            );
-            painter.add(shape);
-        }
-        Glyph::Pencil => {
-            // The stylesheet's `I.pencil`: a shaft along the diagonal with a
-            // pointed tip at the lower left and the eraser line across the top.
-            // (The previous two strokes read as a golf club at 18 px.)
-            let map = |x: f32, y: f32| {
-                pos2(c.x + (x - 10.0) / 10.0 * s, c.y + (y - 10.0) / 10.0 * s)
-            };
-            painter.add(egui::Shape::closed_line(
-                vec![map(4.0, 16.0), map(4.7, 12.8), map(13.3, 4.2), map(15.3, 6.2), map(6.7, 14.8)],
-                stroke,
-            ));
-            painter.line_segment([map(12.8, 4.7), map(15.3, 7.2)], stroke);
-        }
-        Glyph::Reveal => {
-            painter.circle_stroke(
-                pos2(c.x - s * 0.2, c.y - s * 0.2),
-                s * 0.45,
-                stroke,
-            );
-            painter.line_segment(
-                [pos2(c.x + s * 0.12, c.y + s * 0.12), pos2(c.x + s * 0.6, c.y + s * 0.6)],
-                stroke,
-            );
-        }
-        Glyph::Close => {
-            let arm = s * 0.55;
-            painter.line_segment(
-                [pos2(c.x - arm, c.y - arm), pos2(c.x + arm, c.y + arm)],
-                stroke,
-            );
-            painter.line_segment(
-                [pos2(c.x + arm, c.y - arm), pos2(c.x - arm, c.y + arm)],
-                stroke,
-            );
-        }
-        Glyph::Trash => {
-            let body = Rect::from_center_size(
-                pos2(c.x, c.y + s * 0.12),
-                vec2(s * 1.1, s * 1.3),
-            );
-            painter.rect_stroke(body, CornerRadius::same(2), stroke, StrokeKind::Inside);
-            painter.line_segment(
-                [pos2(c.x - s * 0.7, body.top()), pos2(c.x + s * 0.7, body.top())],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    pos2(c.x - s * 0.25, body.top() - s * 0.25),
-                    pos2(c.x + s * 0.25, body.top() - s * 0.25),
-                ],
-                stroke,
-            );
-        }
-    }
+    let icon = match glyph {
+        Glyph::Folder | Glyph::Reveal => Icon::Folder,
+        Glyph::Up => Icon::Up,
+        Glyph::Down => Icon::Down,
+        Glyph::Sync => Icon::Sync,
+        Glyph::Pause => Icon::Pause,
+        Glyph::Play => Icon::Play,
+        Glyph::Pencil => Icon::Pencil,
+        Glyph::Trash => Icon::Trash,
+        Glyph::Close => Icon::Close,
+    };
+    icons::paint(painter, rect.center(), size, icon, colour);
 }
 
 /// `DIR_VERB` in app.js.

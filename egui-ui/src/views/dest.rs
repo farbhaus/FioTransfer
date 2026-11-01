@@ -11,9 +11,10 @@
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
     pos2, vec2, Align, Color32, CornerRadius, Id, Key, Label, Layout, Margin, Painter, Pos2, Rect,
-    RichText, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, WidgetInfo, WidgetType,
+    RichText, Sense, Shape, Stroke, TextEdit, Ui, WidgetInfo, WidgetType,
 };
 
+use crate::icons::{self, Icon};
 use crate::model::{DestMode, DestNode, DestPicker, Request, UiState};
 use crate::theme;
 
@@ -621,45 +622,14 @@ enum Glyph {
 }
 
 fn paint(painter: &Painter, rect: Rect, glyph: Glyph, colour: Color32) {
-    let s = rect.width() / 20.0;
-    let at = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
-    let stroke = Stroke::new(1.4_f32, colour);
-    match glyph {
-        Glyph::Team => {
-            painter.circle_stroke(at(8.0, 7.5), 2.6 * s, stroke);
-            painter.add(Shape::line(vec![at(3.5, 15.5), at(5.0, 13.0), at(8.0, 11.9), at(11.0, 13.0), at(12.5, 15.5)], stroke));
-            painter.add(Shape::line(vec![at(13.0, 5.2), at(14.8, 6.2), at(15.0, 7.5), at(14.8, 8.8), at(13.0, 9.8)], stroke));
-            painter.add(Shape::line(vec![at(14.5, 11.9), at(16.2, 13.2), at(16.9, 15.5)], stroke));
-        }
-        Glyph::Project => {
-            painter.rect_stroke(Rect::from_min_max(at(3.0, 4.0), at(17.0, 16.0)), CornerRadius::same(2), stroke, StrokeKind::Middle);
-            painter.line_segment([at(3.0, 8.0), at(17.0, 8.0)], stroke);
-        }
-        Glyph::Folder => {
-            let outline = vec![
-                at(3.0, 6.2),
-                at(4.2, 5.0),
-                at(7.6, 5.0),
-                at(9.2, 6.7),
-                at(15.8, 6.7),
-                at(17.0, 7.9),
-                at(17.0, 14.8),
-                at(15.8, 16.0),
-                at(4.2, 16.0),
-                at(3.0, 14.8),
-            ];
-            painter.add(Shape::closed_line(outline, stroke));
-        }
-        Glyph::Search => {
-            painter.circle_stroke(at(9.0, 9.0), 5.0 * s, Stroke::new(1.5_f32, colour));
-            painter.line_segment([at(13.0, 13.0), at(16.5, 16.5)], Stroke::new(1.5_f32, colour));
-        }
-        Glyph::Close => {
-            let stroke = Stroke::new(1.5_f32, colour);
-            painter.line_segment([at(6.0, 6.0), at(14.0, 14.0)], stroke);
-            painter.line_segment([at(14.0, 6.0), at(6.0, 14.0)], stroke);
-        }
-    }
+    let icon = match glyph {
+        Glyph::Team => Icon::Team,
+        Glyph::Project => Icon::Project,
+        Glyph::Folder => Icon::Folder,
+        Glyph::Search => Icon::Search,
+        Glyph::Close => Icon::Close,
+    };
+    icons::paint(painter, rect.center(), rect.width(), icon, colour);
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@
 //! The shell (`crate::app`) supplies the `.view` padding, the scroll area and
 //! the page head; the tokens come from [`crate::theme`].
 
+use crate::icons;
 use crate::model::{HistoryRow, Request, UiState};
 use crate::theme;
 use egui::{
@@ -282,19 +283,7 @@ fn search_field(ui: &mut egui::Ui, width: f32, query: &mut String) -> bool {
         egui::pos2(rect.left() + 9.0 + 8.0, rect.center().y),
         vec2(16.0, 16.0),
     );
-    let stroke = Stroke::new(1.5_f32, theme::TEXT_3);
-    ui.painter().circle_stroke(
-        egui::pos2(icon.center().x - 2.0, icon.center().y - 2.0),
-        4.0,
-        stroke,
-    );
-    ui.painter().line_segment(
-        [
-            egui::pos2(icon.center().x + 1.0, icon.center().y + 1.0),
-            egui::pos2(icon.center().x + 6.0, icon.center().y + 6.0),
-        ],
-        stroke,
-    );
+    icons::paint(ui.painter(), icon.center(), theme::icon::CONTROL, icons::Icon::Search, theme::TEXT_3);
 
     let mut child = ui.new_child(
         egui::UiBuilder::new()
@@ -461,25 +450,9 @@ fn kind_tile(ui: &mut egui::Ui, kind: &str) {
     painter.rect_filled(rect, theme::R_S, theme::CARD);
     painter.rect_stroke(rect, theme::R_S, theme::stroke_border(), StrokeKind::Inside);
 
-    // `I.up` / `I.down` in app.js: a 10 px arrow on the tile's centre line.
-    let stroke = Stroke::new(1.5_f32, theme::TEXT_2);
-    let up = kind != "download";
-    let half = size * 0.2;
-    let (tail, head) = if up {
-        (rect.center().y + half, rect.center().y - half)
-    } else {
-        (rect.center().y - half, rect.center().y + half)
-    };
-    let centre_x = rect.center().x;
-    painter.line_segment([egui::pos2(centre_x, tail), egui::pos2(centre_x, head)], stroke);
-    painter.line_segment(
-        [egui::pos2(centre_x - 3.5, head - if up { -3.5 } else { 3.5 }), egui::pos2(centre_x, head)],
-        stroke,
-    );
-    painter.line_segment(
-        [egui::pos2(centre_x + 3.5, head - if up { -3.5 } else { 3.5 }), egui::pos2(centre_x, head)],
-        stroke,
-    );
+    // `I.up` / `I.down` in app.js.
+    let arrow = if kind == "download" { icons::Icon::Down } else { icons::Icon::Up };
+    icons::paint(painter, rect.center(), theme::icon::CONTROL, arrow, theme::TEXT_2);
 }
 
 /// `.status`: a 7 px dot in the status colour, then the status word.

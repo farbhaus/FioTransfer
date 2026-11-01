@@ -36,6 +36,7 @@
 //! The shell (`crate::app`) supplies the `.view` padding, the scroll area and the
 //! page head; the tokens come from [`crate::theme`].
 
+use crate::icons::{self, Icon};
 use crate::model::{
     fmt_bytes, Request, SpaceAccount, SpaceCrumb, SpaceFolderView, SpaceItemRow, SpaceOpen, SpaceRow,
     SpaceTarget, UiState, View,
@@ -1625,62 +1626,16 @@ fn icon_button(ui: &mut egui::Ui, glyph: Glyph, label: &str) -> bool {
     response.clicked()
 }
 
-/// Paint `glyph` in `rect`, on the 20-unit canvas the SVG paths are written for.
+/// Paint `glyph` at `rect`'s centre, `size` px square. Refresh is `I.retry`.
 fn paint_glyph(painter: &Painter, rect: Rect, glyph: Glyph, colour: Color32, size: f32) {
-    let box_ = Rect::from_center_size(rect.center(), Vec2::splat(size));
-    let scale = size / 20.0;
-    let p = |x: f32, y: f32| pos2(box_.left() + x * scale, box_.top() + y * scale);
-    // `stroke-width: 1.5` in the paths' 20-unit viewBox, never thinner than a pixel.
-    let stroke = Stroke::new((1.5 * scale).max(1.0), colour);
-    match glyph {
-        // "M15.5 10a5.5 5.5 0 1 1-1.6-3.9M15.5 4v3.4h-3.4": an almost-circle with
-        // an arrowhead where it stops.
-        Glyph::Refresh => {
-            const STEPS: usize = 40;
-            let start = -50.0_f32;
-            let mut arc = Vec::with_capacity(STEPS + 1);
-            for step in 0..=STEPS {
-                let angle = (start + 290.0 * step as f32 / STEPS as f32).to_radians();
-                arc.push(pos2(
-                    box_.center().x + 5.5 * scale * angle.cos(),
-                    box_.center().y + 5.5 * scale * angle.sin(),
-                ));
-            }
-            let tip = *arc.last().expect("an arc has points");
-            painter.add(Shape::line(arc, stroke));
-            // The head of the arrow, at the arc's end, pointing along it.
-            painter.line_segment([tip, pos2(tip.x - 1.6 * scale, tip.y - 2.8 * scale)], stroke);
-            painter.line_segment([tip, pos2(tip.x + 2.6 * scale, tip.y - 1.4 * scale)], stroke);
-        }
-        // "M4.5 6h11M8 6V4.5h4V6M6 6l.7 9.5h6.6L14 6": lid, handle, body.
-        Glyph::Trash => {
-            painter.add(Shape::line(vec![p(4.5, 6.0), p(15.5, 6.0)], stroke));
-            painter.add(Shape::line(
-                vec![p(8.0, 6.0), p(8.0, 4.5), p(12.0, 4.5), p(12.0, 6.0)],
-                stroke,
-            ));
-            painter.add(Shape::line(
-                vec![p(6.0, 6.0), p(6.7, 15.5), p(13.3, 15.5), p(14.0, 6.0)],
-                stroke,
-            ));
-        }
-        // The Space mark: `circle 6.6`, `circle 2.4`, and two ticks from the
-        // outer ring towards the inner one.
-        Glyph::Donut => {
-            painter.circle_stroke(p(10.0, 10.0), 6.6 * scale, stroke);
-            painter.circle_stroke(p(10.0, 10.0), 2.4 * scale, stroke);
-            painter.line_segment([p(10.0, 3.4), p(10.0, 7.6)], stroke);
-            painter.line_segment([p(16.6, 10.0), p(12.4, 10.0)], stroke);
-        }
-        // "M6 6l8 8M14 6l-8 8".
-        Glyph::Close => {
-            painter.line_segment([p(6.0, 6.0), p(14.0, 14.0)], stroke);
-            painter.line_segment([p(14.0, 6.0), p(6.0, 14.0)], stroke);
-        }
-        Glyph::Chevron => {
-            painter.add(Shape::line(vec![p(8.0, 5.5), p(12.5, 10.0), p(8.0, 14.5)], stroke));
-        }
-    }
+    let icon = match glyph {
+        Glyph::Refresh => Icon::Retry,
+        Glyph::Trash => Icon::Trash,
+        Glyph::Donut => Icon::Donut,
+        Glyph::Close => Icon::Close,
+        Glyph::Chevron => Icon::ChevronRight,
+    };
+    icons::paint(painter, rect.center(), size, icon, colour);
 }
 
 // ---------- the empty state ----------

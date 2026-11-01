@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod fixture;
+pub mod icons;
 pub mod model;
 pub mod theme;
 pub mod views;

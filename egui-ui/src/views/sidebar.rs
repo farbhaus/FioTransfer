@@ -28,10 +28,11 @@
 //! the two speeds are the sum of the per-job speeds by kind, as
 //! `renderSnapshot` computes `up`/`down` — not `snapshot.speed`.
 
+use crate::icons;
 use crate::model::{Request, UiState, View, fmt_speed};
 use crate::theme;
 use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Sense, Stroke, Vec2, pos2, vec2,
+    Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Sense, Vec2, pos2, vec2,
     emath::GuiRounding as _,
 };
 
@@ -674,101 +675,14 @@ fn icon_for(view: View) -> Icon {
 }
 
 fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32, stroke_width: f32) {
-    let scale = rect.width().min(rect.height()) / 20.0;
-    if scale <= 0.0 {
-        return;
-    }
-    let p = |x: f32, y: f32| pos2(rect.left() + x * scale, rect.top() + y * scale);
-    let stroke = Stroke::new(stroke_width * scale, color);
-    match icon {
-        // "M6.5 15V5m0 0L3.8 7.7M6.5 5l2.7 2.7M13.5 5v10m0 0l-2.7-2.7m2.7 2.7l2.7-2.7"
-        Icon::Arrows => {
-            polyline(painter, &[p(6.5, 15.0), p(6.5, 5.0)], stroke);
-            polyline(painter, &[p(6.5, 5.0), p(3.8, 7.7)], stroke);
-            polyline(painter, &[p(6.5, 5.0), p(9.2, 7.7)], stroke);
-            polyline(painter, &[p(13.5, 5.0), p(13.5, 15.0)], stroke);
-            polyline(painter, &[p(13.5, 15.0), p(10.8, 12.3)], stroke);
-            polyline(painter, &[p(13.5, 15.0), p(16.2, 12.3)], stroke);
-        }
-        // The Space mark, from `index.html`: `<circle r=6.6>`, `<circle r=2.4>`
-        // and two ticks, `M10 3.4v4.2M16.6 10h-4.2` — a donut seen end on.
-        Icon::Pie => {
-            painter.circle_stroke(p(10.0, 10.0), 6.6 * scale, stroke);
-            painter.circle_stroke(p(10.0, 10.0), 2.4 * scale, stroke);
-            polyline(painter, &[p(10.0, 3.4), p(10.0, 7.6)], stroke);
-            polyline(painter, &[p(16.6, 10.0), p(12.4, 10.0)], stroke);
-        }
-        // "M2.5 10s2.7-5 7.5-5 7.5 5 7.5 5-2.7 5-7.5 5-7.5-5-7.5-5z" + circle 2.2
-        Icon::Eye => {
-            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                [p(2.5, 10.0), p(5.2, 5.0), p(7.3, 5.0), p(10.0, 5.0)],
-                false,
-                Color32::TRANSPARENT,
-                stroke,
-            ));
-            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                [p(10.0, 5.0), p(12.7, 5.0), p(14.8, 5.0), p(17.5, 10.0)],
-                false,
-                Color32::TRANSPARENT,
-                stroke,
-            ));
-            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                [p(17.5, 10.0), p(14.8, 15.0), p(12.7, 15.0), p(10.0, 15.0)],
-                false,
-                Color32::TRANSPARENT,
-                stroke,
-            ));
-            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                [p(10.0, 15.0), p(7.3, 15.0), p(5.2, 15.0), p(2.5, 10.0)],
-                false,
-                Color32::TRANSPARENT,
-                stroke,
-            ));
-            painter.circle_stroke(p(10.0, 10.0), 2.2 * scale, stroke);
-        }
-        // "M3.5 10a6.5 6.5 0 1 0 1.9-4.6M3.5 4v3.4h3.4M10 6.5V10l2.5 1.6"
-        Icon::Clock => {
-            // The SVG arc: the large arc from the 9-o'clock point, round the
-            // bottom, the right and the top, back to 10-o'clock.
-            const STEPS: usize = 44;
-            let mut arc = Vec::with_capacity(STEPS + 1);
-            for i in 0..=STEPS {
-                let t = i as f32 / STEPS as f32;
-                let angle = (180.0 + 315.0 * t).to_radians();
-                arc.push(p(
-                    10.0 + 6.5 * angle.cos(),
-                    10.0 - 6.5 * angle.sin(),
-                ));
-            }
-            polyline(painter, &arc, stroke);
-            polyline(painter, &[p(3.5, 4.0), p(3.5, 7.4), p(6.9, 7.4)], stroke);
-            polyline(painter, &[p(10.0, 6.5), p(10.0, 10.0), p(12.5, 11.6)], stroke);
-        }
-        // "M4 6h7m4 0h1M4 14h1m4 0h7" + two 2 px circles
-        Icon::Sliders => {
-            polyline(painter, &[p(4.0, 6.0), p(11.0, 6.0)], stroke);
-            polyline(painter, &[p(15.0, 6.0), p(16.0, 6.0)], stroke);
-            polyline(painter, &[p(4.0, 14.0), p(5.0, 14.0)], stroke);
-            polyline(painter, &[p(9.0, 14.0), p(16.0, 14.0)], stroke);
-            painter.circle_stroke(p(13.0, 6.0), 2.0 * scale, stroke);
-            painter.circle_stroke(p(7.0, 14.0), 2.0 * scale, stroke);
-        }
-    }
-}
-
-/// One stroked path, with the round caps and joins the SVGs ask for
-/// (`stroke-linecap="round"`, `stroke-linejoin="round"`): egui leaves open
-/// paths uncapped, so each vertex also gets a dot of half the stroke width.
-fn polyline(painter: &egui::Painter, points: &[Pos2], stroke: Stroke) {
-    if points.len() < 2 {
-        return;
-    }
-    painter.add(egui::Shape::line(points.to_vec(), stroke));
-    if stroke.width > 0.0 {
-        for point in points {
-            painter.circle_filled(*point, stroke.width * 0.5, stroke.color);
-        }
-    }
+    let shape = match icon {
+        Icon::Arrows => icons::Icon::Sync,
+        Icon::Eye => icons::Icon::Eye,
+        Icon::Clock => icons::Icon::Clock,
+        Icon::Pie => icons::Icon::Donut,
+        Icon::Sliders => icons::Icon::Sliders,
+    };
+    icons::paint_width(painter, rect.center(), rect.width().min(rect.height()), shape, color, stroke_width);
 }
 
 #[cfg(test)]
