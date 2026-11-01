@@ -29,8 +29,23 @@ pub struct Token {
     #[serde(default)]
     pub refresh_token: String,
     /// Unix seconds.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "expiry_secs")]
     pub expiry: i64,
+}
+
+/// `expiry` as this app writes it (Unix seconds) or as the Go app did (an
+/// RFC 3339 time).
+fn expiry_secs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Expiry {
+        Secs(i64),
+        Time(String),
+    }
+    match Expiry::deserialize(d)? {
+        Expiry::Secs(s) => Ok(s),
+        Expiry::Time(t) => crate::share::parse_rfc3339(&t).ok_or_else(|| serde::de::Error::custom("expiry isn't a time")),
+    }
 }
 
 impl Token {
@@ -431,7 +446,21 @@ fn load_token() -> Option<Token> {
         Some(s) => Some(s.into_bytes()),
         None => std::fs::read(fallback_path()).ok(),
     }?;
-    let t: Token = serde_json::from_slice(&raw).ok()?;
+    parse_token(&raw)
+}
+
+/// Reads a stored session: this app's JSON, or the Go app's, which go-keyring
+/// wrapped as `go-keyring-base64:<base64>`. Without this, updating from the Go
+/// app would sign everyone out.
+fn parse_token(raw: &[u8]) -> Option<Token> {
+    use base64::Engine;
+    let decoded;
+    let mut raw = raw;
+    if let Some(b) = raw.strip_prefix(b"go-keyring-base64:") {
+        decoded = base64::engine::general_purpose::STANDARD.decode(b.trim_ascii()).ok()?;
+        raw = &decoded;
+    }
+    let t: Token = serde_json::from_slice(raw).ok()?;
     if t.refresh_token.is_empty() {
         return None;
     }
@@ -441,4 +470,38 @@ fn load_token() -> Option<Token> {
 fn clear_token() {
     secret::delete(KEYRING_USER);
     let _ = std::fs::remove_file(fallback_path());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_this_apps_session() {
+        let t = parse_token(br#"{"access_token":"a","refresh_token":"r","expiry":1798000000}"#).unwrap();
+        assert_eq!((t.access_token.as_str(), t.refresh_token.as_str(), t.expiry), ("a", "r", 1798000000));
+    }
+
+    // What the Go app left in the Keychain: go-keyring's wrapping around
+    // json.Marshal of a Token whose expiry is a time.Time.
+    #[test]
+    fn reads_the_go_apps_session() {
+        use base64::Engine;
+        let json = r#"{"access_token":"a","refresh_token":"r","expiry":"2026-10-31T18:23:45.123456789+01:00"}"#;
+        let raw = format!("go-keyring-base64:{}", base64::engine::general_purpose::STANDARD.encode(json));
+        let t = parse_token(raw.as_bytes()).unwrap();
+        assert_eq!((t.access_token.as_str(), t.refresh_token.as_str()), ("a", "r"));
+        assert_eq!(t.expiry, 1793467425); // 17:23:45 UTC
+
+        // The shape a real Go session had: UTC, microseconds.
+        let json = r#"{"access_token":"a","refresh_token":"r","expiry":"2026-10-31T17:23:45.123456Z"}"#;
+        let raw = format!("go-keyring-base64:{}", base64::engine::general_purpose::STANDARD.encode(json));
+        assert_eq!(parse_token(raw.as_bytes()).unwrap().expiry, 1793467425);
+    }
+
+    #[test]
+    fn a_session_without_a_refresh_token_is_none() {
+        assert!(parse_token(br#"{"access_token":"a","refresh_token":"","expiry":1}"#).is_none());
+        assert!(parse_token(b"go-keyring-base64:!!!").is_none());
+    }
 }
