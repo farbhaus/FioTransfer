@@ -73,6 +73,8 @@ fn documented_limits() -> &'static HashMap<&'static str, LimitSpec> {
         add("GET /v4/accounts/:id/files/:id/status", 5, Duration::from_secs(1));
         add("GET /v4/accounts/:id/files/:id", 10, Duration::from_secs(1));
         add("DELETE /v4/accounts/:id/files/:id", 100, Duration::from_secs(60));
+        add("DELETE /v4/accounts/:id/folders/:id", 60, Duration::from_secs(60));
+        add("DELETE /v4/accounts/:id/projects/:id", 60, Duration::from_secs(60));
         add("POST /v4/accounts/:id/folders/:id/folders", 3, Duration::from_secs(1));
         add("POST /v4/accounts/:id/projects/:id/shares", 10, Duration::from_secs(60));
         m
@@ -455,6 +457,13 @@ impl Client {
     /// one call the Space view makes, and it never runs `rm`.
     pub async fn delete_project(&self, cx: &CancellationToken, acct: &str, project: &str) -> Result<(), ApiErr> {
         self.call(cx, "DELETE", &format!("/v4/accounts/{}/projects/{}", acct, project), &[], None).await
+    }
+
+    /// Deletes a folder and everything in it on Frame.io. Like
+    /// `delete_project`, only the Space view calls it, and nothing local is
+    /// touched.
+    pub async fn delete_folder(&self, cx: &CancellationToken, acct: &str, folder: &str) -> Result<(), ApiErr> {
+        self.call(cx, "DELETE", &format!("/v4/accounts/{}/folders/{}", acct, folder), &[], None).await
     }
 
     pub async fn delete_file(&self, cx: &CancellationToken, acct: &str, file: &str) -> Result<(), ApiErr> {

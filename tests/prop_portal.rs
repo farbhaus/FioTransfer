@@ -912,9 +912,9 @@ fn an_unknown_sync_mode_is_read_as_add_only_and_said_so() {
 
 /// The deletion promise, asserted rather than written down as a comment.
 ///
-/// `Client::delete_file` and `Client::delete_project` are the only two ways
-/// this app can take a file or a project off Frame.io, and nothing on the watch
-/// path calls either: no `sync` mapping may turn "gone locally" into "delete it
+/// `Client::delete_file`, `Client::delete_folder` and `Client::delete_project`
+/// are the only ways this app can take a file, a folder or a project off
+/// Frame.io, and nothing on the watch path calls any of them: no `sync` mapping may turn "gone locally" into "delete it
 /// there", and no mapping may turn "gone on Frame.io" into "delete it here".
 ///
 /// The check reads the sources of the code that decides what a watch does — the
@@ -934,7 +934,7 @@ fn the_api_delete_functions_are_not_reachable_from_the_watch_path() {
     ];
     for (name, src) in WATCH_PATH {
         let code = without_comments(src);
-        for call in ["delete_file", "delete_project"] {
+        for call in ["delete_file", "delete_folder", "delete_project"] {
             assert!(
                 !code.contains(&format!("{}(", call)),
                 "{} calls {}: a watch must never delete on the other side",

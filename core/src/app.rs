@@ -9,7 +9,7 @@
 //! (`egui-ui`), the CLI and the bench all drive the same logic.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -27,6 +27,11 @@ use crate::services::ServiceRequest;
 use crate::share;
 use crate::update::{self, Release};
 use crate::xfer::{self, manager as xfer_manager, DownloadOptions, LinkInfo, Snapshot, Status, UploadOptions};
+
+mod space_folders;
+pub use space_folders::{
+    items_of, FolderCache, SpaceDeleteReport, SpaceFolder, SpaceItem, SpaceTarget, KIND_FILE, KIND_FOLDER, KIND_STACK,
+};
 
 /// One level of a Frame.io path: account, workspace, project or folder.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -108,6 +113,14 @@ pub struct App {
     /// asking Frame.io again.
     space: Mutex<Option<(Instant, SpacePayload)>>,
     space_walking: AtomicBool,
+    /// What each folder holds, for the Space screen opened into a project
+    /// (`space_folders.rs`).
+    space_folders: Mutex<FolderCache>,
+    /// Bumped by every `open_space_folder`; a walk stops when it is not current.
+    space_seq: AtomicU64,
+    /// The folder the current walk was opened on: (seq, account, folder).
+    space_counting: Mutex<Option<(u64, String, String)>>,
+    space_deleting: Mutex<space_folders::Deleting>,
     /// The last Portal reconcile, for the status line.
     portal_last: Mutex<Option<portal::agent::Report>>,
     portal_running: AtomicBool,
@@ -173,6 +186,10 @@ impl App {
             started: Mutex::new(None),
             space: Mutex::new(None),
             space_walking: AtomicBool::new(false),
+            space_folders: Mutex::new(FolderCache::default()),
+            space_seq: AtomicU64::new(0),
+            space_counting: Mutex::new(None),
+            space_deleting: Mutex::new(Default::default()),
             portal_last: Mutex::new(None),
             portal_running: AtomicBool::new(false),
             portal_signed_in: AtomicBool::new(false),
@@ -1456,6 +1473,8 @@ impl App {
         if self.space_walking.swap(true, Ordering::SeqCst) {
             return; // a refresh is already running
         }
+        // What the folders hold is read again too, when a project is opened.
+        self.space_folders.lock().unwrap().clear();
         let cx = self.api_cx();
         let mut out: Vec<SpaceProject> = Vec::new();
         let mut quotas: Vec<SpaceAccount> = Vec::new();

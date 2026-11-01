@@ -8,8 +8,9 @@
 //! Nothing here does I/O or touches a screen: it builds a [`UiState`] and stops.
 
 use crate::model::{
-    Crumb, FileView, HistoryRow, JobView, PortalUi, PortalView, Settings, Snapshot, SpaceAccount, SpaceRow, Toast,
-    Lane, ToastKind, UiState, UpdateState, User, View, WatchRow,
+    Crumb, FileView, HistoryRow, JobView, PortalUi, PortalView, Settings, Snapshot, SpaceAccount, SpaceCrumb,
+    SpaceFolderView, SpaceItemRow, SpaceOpen, SpaceRow, Toast, Lane, ToastKind, UiState, UpdateState, User, View,
+    WatchRow,
 };
 
 /// The moment the fixture is drawn at, so the Portal status line's "2 min ago" is
@@ -237,6 +238,7 @@ pub fn fixture_state(view: View) -> UiState {
                 account_name: "Farbhaus".into(),
                 workspace_name: "Shows".into(),
                 project_id: "proj-nightfall".into(),
+                root_folder_id: "root-nightfall".into(),
                 name: "Nightfall".into(),
                 bytes: 12_400_000_000,
                 files: 1_284,
@@ -248,6 +250,7 @@ pub fn fixture_state(view: View) -> UiState {
                 account_name: "Farbhaus".into(),
                 workspace_name: "Shows".into(),
                 project_id: "proj-archive".into(),
+                root_folder_id: "root-archive".into(),
                 name: "Archive 2024".into(),
                 bytes: 2_100_000_000,
                 files: 212,
@@ -259,6 +262,7 @@ pub fn fixture_state(view: View) -> UiState {
                 account_name: "Farbhaus".into(),
                 workspace_name: "Marketing".into(),
                 project_id: "proj-trailer".into(),
+                root_folder_id: "root-trailer".into(),
                 name: "Trailer Cutdown".into(),
                 bytes: 640_000_000,
                 files: 0,
@@ -290,6 +294,8 @@ pub fn fixture_state(view: View) -> UiState {
             },
         ],
         space_walking: false,
+        space_open: None,
+        space_folder: SpaceFolderView::default(),
         toasts: vec![
             Toast {
                 text: "Share link copied".into(),
@@ -333,5 +339,57 @@ pub fn fixture_state_empty_space() -> UiState {
     state.space_walking = false;
     state.logged_in = true;
     state.toasts.clear();
+    state
+}
+
+/// The Space screen opened into a client's project: four job folders the walk
+/// has added up (one of them a watch folder's destination), one still being
+/// counted, and a loose file. Two rows are ticked, so the head offers "Delete 2".
+///
+/// `space-project.png` is drawn from this.
+pub fn fixture_state_space_project() -> UiState {
+    let mut state = fixture_state(View::Space);
+    state.toasts.clear();
+    let folder = |id: &str, name: &str, bytes: i64, files: i64| SpaceItemRow {
+        id: id.into(),
+        kind: "folder".into(),
+        name: name.into(),
+        bytes,
+        files,
+        counted: true,
+        ..SpaceItemRow::default()
+    };
+    state.space_open = Some(SpaceOpen {
+        account_id: "acct-farbhaus".into(),
+        account_name: "Farbhaus".into(),
+        workspace_name: "Shows".into(),
+        project_id: "proj-nightfall".into(),
+        trail: vec![SpaceCrumb { id: "root-nightfall".into(), name: "Nightfall".into() }],
+        selected: ["f-ep02".to_string(), "f-ep01".to_string()].into_iter().collect(),
+    });
+    state.space_folder = SpaceFolderView {
+        items: vec![
+            SpaceItemRow {
+                watches: vec!["Renders".into()],
+                ..folder("f-ep04", "Ep 04", 5_200_000_000, 412)
+            },
+            folder("f-ep03", "Ep 03", 3_900_000_000, 318),
+            folder("f-ep02", "Ep 02", 2_100_000_000, 290),
+            folder("f-ep01", "Ep 01", 1_050_000_000, 251),
+            SpaceItemRow { counted: false, ..folder("f-promo", "Promo", 0, 0) },
+            SpaceItemRow {
+                id: "file-brief".into(),
+                kind: "file".into(),
+                name: "Brief.pdf".into(),
+                bytes: 4_200_000,
+                files: 1,
+                counted: true,
+                ..SpaceItemRow::default()
+            },
+        ],
+        listed: true,
+        counting: true,
+        error: String::new(),
+    };
     state
 }

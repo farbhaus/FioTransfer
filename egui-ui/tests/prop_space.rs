@@ -32,6 +32,7 @@ fn row(index: usize, bytes: i64) -> SpaceRow {
         workspace_name: "Shows".into(),
         project_id: format!("proj-{index}"),
         name: format!("Project {index}"),
+        root_folder_id: format!("root-{index}"),
         bytes,
         files: index as i64,
         // A walked row: the sweep's rows carry a file count. `walked` arrived

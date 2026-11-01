@@ -696,6 +696,42 @@ impl Shell {
                     }
                 });
             }
+            Request::OpenSpaceFolder { account_id, folder_id, parent } => {
+                // What the cache already has shows on this frame.
+                self.read_space(ui);
+                self.open_space_folder(account_id, folder_id, parent);
+            }
+            Request::RefreshSpaceFolder { account_id, folder_id, parent } => {
+                self.app.forget_space_folder(&account_id, &folder_id);
+                self.read_space(ui);
+                self.open_space_folder(account_id, folder_id, parent);
+            }
+            Request::DeleteSpaceItems { account_id, project_id, folder_id, items, what } => {
+                let (app, tx) = (self.app.clone(), self.tx.clone());
+                let targets: Vec<_> = items.into_iter().map(Into::into).collect();
+                self.spawn_task(async move {
+                    match app.delete_space_items(&account_id, &project_id, &folder_id, &targets).await {
+                        Ok(report) if report.failed.is_empty() => {
+                            toast(&tx, format!("Deleted {what} on Frame.io"), ToastKind::Ok);
+                        }
+                        Ok(report) => {
+                            let (name, why) = &report.failed[0];
+                            let text = if targets.len() == 1 {
+                                format!("Could not delete {name}: {why}")
+                            } else {
+                                format!(
+                                    "Deleted {} of {} on Frame.io. {name}: {why}",
+                                    report.deleted.len(),
+                                    targets.len()
+                                )
+                            };
+                            toast(&tx, text, ToastKind::Err);
+                        }
+                        Err(err) => toast(&tx, err, ToastKind::Err),
+                    }
+                    let _ = tx.send(Update::Done(Done::Changed));
+                });
+            }
 
             // ---- the window ----
             Request::Refresh => self.read_all(ui),
@@ -970,6 +1006,9 @@ impl Shell {
     fn read_space(&mut self, ui: &mut UiState) {
         ui.apply_space(self.app.space().into());
         ui.space_walking = self.app.space_walking();
+        if let Some(open) = &ui.space_open {
+            ui.space_folder = self.app.space_folder(&open.account_id, &open.folder().id).into();
+        }
     }
 
     /// The watch folders, as the screen draws them: one row per watch, each
@@ -1054,6 +1093,16 @@ impl Shell {
         let (app, tx) = (self.app.clone(), self.tx.clone());
         self.spawn_task(async move {
             app.refresh_space().await;
+            let _ = tx.send(Update::Done(Done::Changed));
+        });
+    }
+
+    /// A folder of an opened project: listed and counted on the runtime, read
+    /// back from the app's cache as the walk fills it in.
+    fn open_space_folder(&mut self, account_id: String, folder_id: String, parent: Option<String>) {
+        let (app, tx) = (self.app.clone(), self.tx.clone());
+        self.spawn_task(async move {
+            app.open_space_folder(&account_id, &folder_id, parent.as_deref()).await;
             let _ = tx.send(Update::Done(Done::Changed));
         });
     }

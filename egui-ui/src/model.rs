@@ -176,6 +176,20 @@ pub enum Request {
     /// Delete one project on Frame.io (`DeleteProject(account, project)`).
     /// `name` is for the toast; the two ids are what the call takes.
     DeleteProject { account_id: String, project_id: String, name: String },
+    /// List a folder of an opened project and add up its subfolders
+    /// (`App::open_space_folder`). `parent` is `None` for the project's root.
+    OpenSpaceFolder { account_id: String, folder_id: String, parent: Option<String> },
+    /// Refresh inside a project: walk the folder again, then open it.
+    RefreshSpaceFolder { account_id: String, folder_id: String, parent: Option<String> },
+    /// Delete items of one folder on Frame.io (`App::delete_space_items`),
+    /// exactly the ones the confirmation listed. `what` names them in the toast.
+    DeleteSpaceItems {
+        account_id: String,
+        project_id: String,
+        folder_id: String,
+        items: Vec<SpaceTarget>,
+        what: String,
+    },
 
     /// Settings' Portal section: the server URL, already checked for its scheme
     /// by the row that commits it (`App::set_portal`).
@@ -236,6 +250,11 @@ pub struct UiState {
     /// True while `RefreshSpace` is walking: the Space screen says so instead of
     /// pretending the figures are current.
     pub space_walking: bool,
+    /// The project the Space screen is opened into, or `None` for the project
+    /// list.
+    pub space_open: Option<SpaceOpen>,
+    /// The folder `space_open` shows, as the app's cache has it.
+    pub space_folder: SpaceFolderView,
     pub toasts: Vec<Toast>,
     /// Frame.io destination the composer will upload to.
     pub destination: String,
@@ -682,9 +701,8 @@ impl PortalView {
 
 /// One project's footprint on Frame.io, as `App::Space` reports it.
 ///
-/// The field names are the payload's, minus `root_folder_id` and
-/// `workspace_id`: the screen never names a folder, only the project it would
-/// delete. `bytes` is what Frame.io reported for the project, or what the walk
+/// The field names are the payload's, minus `workspace_id`; `root_folder_id` is
+/// where the screen opens the project. `bytes` is what Frame.io reported for the project, or what the walk
 /// added up when it reported nothing; `walked` says which, and `files` is only
 /// counted by a walk (0 means "not counted", drawn as a dash). `error` is set
 /// when a walk could not finish (permissions, a folder deleted mid-walk).
@@ -696,12 +714,147 @@ pub struct SpaceRow {
     pub workspace_name: String,
     pub project_id: String,
     pub name: String,
+    pub root_folder_id: String,
     pub bytes: i64,
     pub files: i64,
     /// True when `bytes` came from walking the project's folders, false when
     /// Frame.io reported it. The row says which.
     pub walked: bool,
     pub error: String,
+}
+
+/// The Space screen opened into a project: where it is, and what is ticked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpaceOpen {
+    pub account_id: String,
+    pub account_name: String,
+    pub workspace_name: String,
+    pub project_id: String,
+    /// The folders opened, the project's root first (named after the project).
+    pub trail: Vec<SpaceCrumb>,
+    /// Ticked rows of the folder shown, by id. Cleared when the folder changes.
+    pub selected: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpaceCrumb {
+    pub id: String,
+    pub name: String,
+}
+
+impl SpaceOpen {
+    /// The folder shown: the last crumb.
+    pub fn folder(&self) -> &SpaceCrumb {
+        self.trail.last().expect("an opened project has its root in the trail")
+    }
+
+    /// The folder above the one shown, `None` at the project's root.
+    pub fn parent(&self) -> Option<&SpaceCrumb> {
+        self.trail.len().checked_sub(2).and_then(|i| self.trail.get(i))
+    }
+
+    pub fn at_root(&self) -> bool {
+        self.trail.len() <= 1
+    }
+
+    /// Go into a subfolder of the one shown.
+    pub fn enter(&mut self, id: &str, name: &str) {
+        self.trail.push(SpaceCrumb { id: id.into(), name: name.into() });
+        self.selected.clear();
+    }
+
+    /// Go back up to crumb `index` (0 is the project's root).
+    pub fn cut(&mut self, index: usize) {
+        self.trail.truncate(index + 1);
+        self.selected.clear();
+    }
+
+    /// The request that lists and counts the folder shown.
+    pub fn open_request(&self) -> Request {
+        Request::OpenSpaceFolder {
+            account_id: self.account_id.clone(),
+            folder_id: self.folder().id.clone(),
+            parent: self.parent().map(|p| p.id.clone()),
+        }
+    }
+}
+
+/// One folder of an opened project, as `App::space_folder` reports it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpaceFolderView {
+    pub items: Vec<SpaceItemRow>,
+    pub listed: bool,
+    pub counting: bool,
+    pub error: String,
+}
+
+/// One thing in a folder: a subfolder, a file or a version stack.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpaceItemRow {
+    pub id: String,
+    /// `folder`, `file` or `version_stack`.
+    pub kind: String,
+    pub name: String,
+    pub bytes: i64,
+    pub files: i64,
+    /// False for a folder the walk has not added up yet.
+    pub counted: bool,
+    pub error: String,
+    pub deleting: bool,
+    /// Watch folders whose Frame.io folder is this one or inside it.
+    pub watches: Vec<String>,
+}
+
+impl SpaceItemRow {
+    pub fn is_folder(&self) -> bool {
+        self.kind == "folder"
+    }
+
+    pub fn target(&self) -> SpaceTarget {
+        SpaceTarget { id: self.id.clone(), kind: self.kind.clone(), name: self.name.clone() }
+    }
+}
+
+/// One thing a delete takes, as the confirmation showed it: the core's
+/// `SpaceTarget`, field for field.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpaceTarget {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<SpaceTarget> for fiotransfer_core::app::SpaceTarget {
+    fn from(t: SpaceTarget) -> Self {
+        fiotransfer_core::app::SpaceTarget { id: t.id, kind: t.kind, name: t.name }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<fiotransfer_core::app::SpaceFolder> for SpaceFolderView {
+    fn from(f: fiotransfer_core::app::SpaceFolder) -> SpaceFolderView {
+        SpaceFolderView {
+            items: f
+                .items
+                .into_iter()
+                .map(|i| SpaceItemRow {
+                    id: i.id,
+                    kind: i.kind,
+                    name: i.name,
+                    bytes: i.bytes,
+                    files: i.files,
+                    counted: i.counted,
+                    error: i.error,
+                    deleting: i.deleting,
+                    watches: i.watches,
+                })
+                .collect(),
+            listed: f.listed,
+            counting: f.counting,
+            error: f.error,
+        }
+    }
 }
 
 /// One account's storage, as `Account.storage_limit` and `Account.storage_usage`
@@ -741,8 +894,8 @@ impl SpaceRow {
     }
 }
 
-/// The core's `SpaceProject`, as this screen wants it: the two fields the screen
-/// never names (`workspace_id`, `root_folder_id`) are dropped.
+/// The core's `SpaceProject`, as this screen wants it: `workspace_id`, which the
+/// screen never names, is dropped.
 ///
 /// Native only: the browser capture is given its rows by `src/fixture.rs`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -754,6 +907,7 @@ impl From<fiotransfer_core::app::SpaceProject> for SpaceRow {
             workspace_name: p.workspace_name,
             project_id: p.project_id,
             name: p.name,
+            root_folder_id: p.root_folder_id,
             bytes: p.bytes,
             files: p.files,
             walked: p.walked,
@@ -1248,8 +1402,8 @@ mod tests {
 
     #[test]
     fn a_space_row_from_the_app_parses_and_knows_its_share() {
-        // The payload `App::Space` returns, with the two fields the screen does
-        // not need (`workspace_id`, `root_folder_id`) still in it.
+        // The payload `App::Space` returns, with the field the screen does not
+        // need (`workspace_id`) still in it.
         let json = r#"{"account_id":"acct-1","account_name":"Farbhaus",
             "workspace_id":"ws-1","workspace_name":"Shows","project_id":"proj-1",
             "name":"Nightfall","root_folder_id":"root-1","bytes":750,"files":3,
@@ -1259,6 +1413,7 @@ mod tests {
         assert_eq!(row.workspace_name, "Shows");
         assert_eq!(row.project_id, "proj-1");
         assert_eq!(row.name, "Nightfall");
+        assert_eq!(row.root_folder_id, "root-1");
         assert_eq!((row.bytes, row.files), (750, 3));
         assert!(!row.incomplete());
         assert_eq!(row.share(3000), 0.25);

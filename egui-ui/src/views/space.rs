@@ -19,21 +19,31 @@
 //!
 //! Deleting is the one destructive thing this screen can ask for, so it never
 //! happens on a click: the row's Delete opens [`confirm_dialog`], which names the
-//! project, its size and where it lives, and says in as many words that the
-//! delete happens on Frame.io only and touches nothing on this Mac. Cancel is the
-//! default — it takes the keyboard focus, Enter takes it, and so do Escape and a
+//! project, its size and where it lives. Cancel is the default — it takes the keyboard focus, Enter takes it, and so do Escape and a
 //! click off the dialog — and only "Delete on Frame.io" reports [`Action::Delete`],
 //! which the shell turns into `call('DeleteProject', account, project)`. Nothing
 //! here reads, moves or removes a local file, and nothing here talks to Frame.io.
 //!
+//! A click on a project's row opens it: the same donut and legend, one row per
+//! thing in the project's root folder (folders added up by a walk as they are
+//! opened, see `core/src/app/space_folders.rs`), with a crumb trail back up. A
+//! folder's row opens that folder. Each row has a checkbox and a Delete; the
+//! head has "Delete N" for the ticked rows and "Empty project" (or "Empty
+//! folder") for everything listed. All three go through the same confirmation,
+//! which lists what goes, keeps Cancel the default and names any watch folder
+//! whose Frame.io folder is inside what it deletes.
+//!
 //! The shell (`crate::app`) supplies the `.view` padding, the scroll area and the
 //! page head; the tokens come from [`crate::theme`].
 
-use crate::model::{fmt_bytes, Request, SpaceAccount, SpaceRow, UiState, View};
+use crate::model::{
+    fmt_bytes, Request, SpaceAccount, SpaceCrumb, SpaceFolderView, SpaceItemRow, SpaceOpen, SpaceRow,
+    SpaceTarget, UiState, View,
+};
 use crate::theme;
 use egui::{
-    Align, Color32, CornerRadius, Id, Label, Layout, Margin, Painter, Pos2, Rect, Response, RichText,
-    Sense, Shape, Stroke, StrokeKind, Vec2, WidgetInfo, WidgetType, pos2, vec2,
+    Align, Checkbox, Color32, CornerRadius, CursorIcon, Id, Label, Layout, Margin, Painter, Pos2, Rect,
+    Response, RichText, Sense, Shape, Stroke, StrokeKind, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 
 // ---------- `.space-*`, as `style.css` writes it ----------
@@ -121,20 +131,35 @@ const SLICE_MIN_DEG: f32 = 0.08;
 /// The dialog's words, from `index.html` and `app.js`. They are quoted in the
 /// tests, so none of them can be softened without a test noticing.
 pub const CONFIRM_TITLE: &str = "Delete project on Frame.io?";
-pub const NOTHING_LOCAL: &str = "This deletes the project on Frame.io only. Nothing on this Mac \
-    is touched: no local folder, file or watch folder changes.";
 pub const CONFIRM_DELETE: &str = "Delete on Frame.io";
 pub const CONFIRM_CANCEL: &str = "Cancel";
 /// The empty state's three variants, as `renderSpace` words them.
 pub const EMPTY_TITLE: &str = "Nothing counted yet";
-pub const EMPTY_SUB: &str = "Refresh adds up what every project on Frame.io is holding.";
 pub const EMPTY_SIGNED_OUT_TITLE: &str = "Sign in to see your space";
-pub const EMPTY_SIGNED_OUT_SUB: &str =
-    "The size of each Frame.io project appears here once you are signed in.";
 pub const EMPTY_WALKING_TITLE: &str = "Walking Frame.io…";
-pub const EMPTY_WALKING_SUB: &str = "Adding up every project. This can take a minute on a big account.";
 /// `#space-chart svg`'s `aria-label`.
 pub const CHART_LABEL: &str = "What each project holds on Frame.io, largest first";
+
+/// Inside a project.
+pub const ALL_PROJECTS: &str = "All projects";
+pub const EMPTY_PROJECT: &str = "Empty project";
+pub const EMPTY_FOLDER: &str = "Empty folder";
+pub const CONFIRM_EMPTY: &str = "Empty on Frame.io";
+pub const NOTHING_HERE_TITLE: &str = "Nothing here";
+pub const LIST_FAILED_TITLE: &str = "Could not list this folder";
+pub const LISTING: &str = "Listing…";
+pub const COUNTING: &str = "Counting folders…";
+/// How many names an items dialog lists before "and N more".
+const NAMES_SHOWN: usize = 3;
+/// `.check` in a row: the box's own column, before the swatch. The widget is
+/// sized to the 15 px box (`interact_size` would make it 32 px wide with the box
+/// in its middle, up against the swatch).
+const CHECK_W: f32 = theme::size::CHECK;
+/// The crumbs' own line, set apart from the account lines above it.
+const CRUMBS_TOP: f32 = theme::space::L;
+/// The row's chevron: 12 px, 4 px after Delete, so both fit the narrow column.
+const CHEVRON: f32 = 12.0;
+const CHEVRON_GAP: f32 = 4.0;
 
 /// Where the open confirmation lives: egui's own per-context store, so the view
 /// stays a pure renderer over [`UiState`] and the dialog survives a frame
@@ -157,6 +182,23 @@ pub enum Action {
         project_id: String,
         name: String,
     },
+    /// A project's row: open its root folder.
+    Open(SpaceRow),
+    /// A folder's row inside a project: go into it.
+    Enter { id: String, name: String },
+    /// A crumb: `None` is the project list, `Some(i)` that folder of the trail.
+    Crumb(Option<usize>),
+    /// Refresh inside a project: walk the folder shown again.
+    RefreshFolder,
+    /// The confirmed delete of items in one folder, exactly the ones the
+    /// dialog listed; `what` names them in the toast.
+    DeleteItems {
+        account_id: String,
+        project_id: String,
+        folder_id: String,
+        items: Vec<SpaceTarget>,
+        what: String,
+    },
 }
 
 /// The screen, wired to the shell: every [`Action`] becomes the [`Request`] the
@@ -176,7 +218,62 @@ fn ask(state: &mut UiState, action: Action) {
         Action::Delete { account_id, project_id, name } => {
             state.ask(Request::DeleteProject { account_id, project_id, name })
         }
+        Action::Open(row) => {
+            let open = SpaceOpen {
+                account_id: row.account_id,
+                account_name: row.account_name,
+                workspace_name: row.workspace_name,
+                project_id: row.project_id,
+                trail: vec![SpaceCrumb { id: row.root_folder_id, name: row.name }],
+                selected: Default::default(),
+            };
+            go(state, Some(open));
+        }
+        Action::Enter { id, name } => {
+            let mut open = state.space_open.take();
+            if let Some(open) = open.as_mut() {
+                open.enter(&id, &name);
+            }
+            go(state, open);
+        }
+        Action::Crumb(at) => {
+            let mut open = state.space_open.take();
+            match (at, open.as_mut()) {
+                (Some(i), Some(open)) => open.cut(i),
+                _ => open = None,
+            }
+            go(state, open);
+        }
+        Action::RefreshFolder => {
+            if let Some(open) = &state.space_open {
+                let request = Request::RefreshSpaceFolder {
+                    account_id: open.account_id.clone(),
+                    folder_id: open.folder().id.clone(),
+                    parent: open.parent().map(|p| p.id.clone()),
+                };
+                state.ask(request);
+            }
+        }
+        Action::DeleteItems { account_id, project_id, folder_id, items, what } => {
+            if let Some(open) = state.space_open.as_mut() {
+                for item in &items {
+                    open.selected.remove(&item.id);
+                }
+            }
+            state.ask(Request::DeleteSpaceItems { account_id, project_id, folder_id, items, what });
+        }
     }
+}
+
+/// Show another folder, or the project list for `None`. The folder's rows are
+/// dropped at once, so not even one frame draws the last folder's rows under
+/// the new crumbs; the shell reads the new folder back from the cache.
+fn go(state: &mut UiState, open: Option<SpaceOpen>) {
+    state.space_folder = SpaceFolderView::default();
+    if let Some(open) = &open {
+        state.ask(open.open_request());
+    }
+    state.space_open = open;
 }
 
 /// The screen, reporting at most one [`Action`] per frame.
@@ -186,6 +283,10 @@ pub fn show_with_actions(ui: &mut egui::Ui, state: &mut UiState) -> Option<Actio
     // item spacing would add a gap to each, so it is zeroed and the gaps are the
     // stylesheet's own.
     ui.spacing_mut().item_spacing = vec2(theme::space::M, 0.0);
+
+    if state.space_open.is_some() {
+        return folder_screen(ui, state);
+    }
 
     let walking = state.space_walking;
     let logged_in = state.logged_in;
@@ -251,24 +352,30 @@ pub fn show_with_actions(ui: &mut egui::Ui, state: &mut UiState) -> Option<Actio
         });
     }
 
-    // The confirmation goes last and on top: `egui::Modal` puts it in the
-    // foreground layer and keeps clicks off the rows underneath.
-    if let Some(confirm) = confirm(ui) {
-        match confirm_dialog(ui.ctx(), &confirm) {
-            Decision::Cancel => clear_confirm(ui),
-            Decision::Delete => {
-                clear_confirm(ui);
-                action = Some(Action::Delete {
-                    account_id: confirm.account_id.clone(),
-                    project_id: confirm.project_id.clone(),
-                    name: confirm.name.clone(),
-                });
-            }
-            Decision::None => {}
-        }
+    if let Some(row) = take_open(ui) {
+        action = Some(Action::Open(row));
     }
-
+    if let Some(confirmed) = run_confirm(ui) {
+        action = Some(confirmed);
+    }
     action
+}
+
+/// The confirmation goes last and on top: `egui::Modal` puts it in the
+/// foreground layer and keeps clicks off the rows underneath.
+fn run_confirm(ui: &mut egui::Ui) -> Option<Action> {
+    let confirm = confirm(ui)?;
+    match confirm_dialog(ui.ctx(), &confirm) {
+        Decision::Cancel => {
+            clear_confirm(ui);
+            None
+        }
+        Decision::Delete => {
+            clear_confirm(ui);
+            Some(confirm.target.into_action())
+        }
+        Decision::None => None,
+    }
 }
 
 // ---------- the head and the status line ----------
@@ -339,6 +446,10 @@ fn left_of(limit: i64, used: i64) -> i64 {
 
 /// `.space-status`: the spinner, then what is being walked and what that means.
 fn status_line(ui: &mut egui::Ui) {
+    status_line_with(ui, EMPTY_WALKING_TITLE, "");
+}
+
+fn status_line_with(ui: &mut egui::Ui, title: &str, sub: &str) {
     ui.add_space(STATUS_TOP);
     // `.space-status { min-height: 24px }`: the line keeps its height while it is
     // up, so the body below does not jump when a walk ends.
@@ -348,16 +459,10 @@ fn status_line(ui: &mut egui::Ui) {
         |ui| {
             ui.spacing_mut().item_spacing.x = theme::space::L;
             spinner(ui);
-            ui.label(
-                RichText::new("Walking Frame.io…")
-                    .font(theme::note())
-                    .color(theme::TEXT_BODY),
-            );
-            ui.label(
-                RichText::new("Adding up every project. Nothing is downloaded, nothing is deleted.")
-                    .font(theme::note())
-                    .color(theme::TEXT_3),
-            );
+            ui.label(RichText::new(title).font(theme::note()).color(theme::TEXT_BODY));
+            if !sub.is_empty() {
+                ui.label(RichText::new(sub).font(theme::note()).color(theme::TEXT_3));
+            }
         },
     );
 }
@@ -395,6 +500,33 @@ pub struct Slice {
     pub colour: Color32,
 }
 
+/// What the chart needs of a row: the bytes it holds. A folder the walk has not
+/// added up yet holds nothing yet.
+pub trait Footprint {
+    fn held(&self) -> i64;
+}
+
+impl Footprint for SpaceRow {
+    fn held(&self) -> i64 {
+        self.bytes
+    }
+}
+
+impl Footprint for SpaceItemRow {
+    fn held(&self) -> i64 {
+        if self.counted { self.bytes } else { 0 }
+    }
+}
+
+/// A row's part of `total`, 0.0–1.0; a total of zero is no share.
+fn share(bytes: i64, total: i64) -> f32 {
+    if total <= 0 || bytes <= 0 {
+        0.0
+    } else {
+        (bytes as f64 / total as f64) as f32
+    }
+}
+
 /// The ring's segments, one per project that holds anything, in row order.
 ///
 /// A project with no bytes gets no segment, but it keeps its place in the colour
@@ -402,7 +534,7 @@ pub struct Slice {
 /// legend draws an empty swatch for it, as `renderSpaceLegend` does. The last
 /// segment is stretched to close the circle, so rounding never leaves a hairline
 /// gap at 12 o'clock.
-pub fn slices(rows: &[SpaceRow]) -> Vec<Slice> {
+pub fn slices<R: Footprint>(rows: &[R]) -> Vec<Slice> {
     let total = total_bytes(rows);
     if total <= 0 {
         return Vec::new();
@@ -410,7 +542,7 @@ pub fn slices(rows: &[SpaceRow]) -> Vec<Slice> {
     let mut out: Vec<Slice> = Vec::with_capacity(rows.len());
     let mut at = 0.0_f32;
     for (index, row) in rows.iter().enumerate() {
-        let span = row.share(total) * 360.0;
+        let span = share(row.held(), total) * 360.0;
         if span <= 0.0 {
             continue;
         }
@@ -435,8 +567,8 @@ pub fn padded(span: f32) -> (f32, f32) {
 }
 
 /// Every project's bytes added up — the figure in the hole and in the head.
-pub fn total_bytes(rows: &[SpaceRow]) -> i64 {
-    rows.iter().map(|row| row.bytes.max(0)).sum()
+pub fn total_bytes<R: Footprint>(rows: &[R]) -> i64 {
+    rows.iter().map(|row| row.held().max(0)).sum()
 }
 
 /// `spaceColor(i)` from app.js: the stylesheet's `--brand` first, then a ramp
@@ -466,7 +598,7 @@ fn hsl(hue: f32, saturation: f32, lightness: f32) -> Color32 {
 }
 
 /// `.space-chart`: the panel the donut sits in.
-fn chart_card(ui: &mut egui::Ui, rows: &[SpaceRow]) {
+fn chart_card<R: Footprint>(ui: &mut egui::Ui, rows: &[R]) {
     let width = CHART_CARD_W.min(ui.available_width());
     let (card, _) = ui.allocate_exact_size(vec2(width, CHART + 2.0 * CHART_PAD_Y), Sense::hover());
     let painter = ui.painter();
@@ -483,7 +615,7 @@ fn chart_card(ui: &mut egui::Ui, rows: &[SpaceRow]) {
 }
 
 /// The ring, and the figure in its hole over "on Frame.io".
-fn donut(ui: &mut egui::Ui, rows: &[SpaceRow]) {
+fn donut<R: Footprint>(ui: &mut egui::Ui, rows: &[R]) {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(CHART), Sense::hover());
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Image, true, CHART_LABEL));
 
@@ -648,7 +780,9 @@ fn legend_row(ui: &mut egui::Ui, index: usize, row: &SpaceRow, columns: &Columns
     } else {
         theme::RAISED
     };
-    strip(ui, ROW_H, true, |ui, hovered| {
+    // A row opens its project. One without a root folder id has nowhere to go.
+    let open = (!row.root_folder_id.is_empty()).then(|| format!("Open {}", row.name));
+    let clicked = strip_with(ui, ROW_H, true, open.as_deref(), |ui, hovered| {
         name_cell(ui, columns.name, row, colour);
         cell(ui, columns.size, ROW_H, true, |ui| {
             ui.add(Label::new(
@@ -676,17 +810,32 @@ fn legend_row(ui: &mut egui::Ui, index: usize, row: &SpaceRow, columns: &Columns
                 // `.space-row:hover .space-del { color: var(--error-text) }` — the
                 // trash can turns red when the row under the pointer says which
                 // project it would delete.
-                if delete_button(ui, row, hovered) {
+                chevron(ui, open.is_some(), hovered);
+                if delete_button(ui, &format!("Delete {} on Frame.io", row.name), hovered) {
                     set_confirm(ui, Some(Confirm::from_row(row)));
                 }
             });
         });
     });
+    if clicked {
+        set_open(ui, row);
+    }
 }
 
-/// The name cell: an 8 px swatch at the name's own top edge, then the two lines
-/// (`.name` and `.sub`) that `.space-row .cell-name { align-items: flex-start }`
-/// puts beside it.
+/// Where a project row's click waits for `show_with_actions` to report it: the
+/// row is drawn deep inside the legend, which reports nothing itself.
+const OPEN_ID: &str = "fiotransfer-egui.space.open";
+
+fn set_open(ui: &mut egui::Ui, row: &SpaceRow) {
+    ui.data_mut(|data| data.insert_temp(Id::new(OPEN_ID), row.clone()));
+}
+
+fn take_open(ui: &mut egui::Ui) -> Option<SpaceRow> {
+    ui.data_mut(|data| data.remove_temp::<SpaceRow>(Id::new(OPEN_ID)))
+}
+
+/// The name cell: an 8 px swatch on the name's line, then the two lines (`.name`
+/// and `.sub`), the pair centred in the row like everything else in it.
 ///
 /// The block is bounded by the column: `.sub` is `overflow: hidden;
 /// text-overflow: ellipsis`, so a long place line is cut rather than allowed to
@@ -695,22 +844,19 @@ fn name_cell(ui: &mut egui::Ui, width: f32, row: &SpaceRow, colour: Color32) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::hover());
     let inset = SWATCH + COL_GAP;
     let names_w = (width - inset).max(0.0);
+    let (block, name_line) = name_block(ui, rect.left() + inset, names_w, rect);
     // A plain child, not `scope_builder`: a scope would advance this row's
     // cursor to the names' own width and pull the size and the Delete button
     // after it.
     let mut child = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(Rect::from_min_size(
-                pos2(rect.left() + inset, rect.top()),
-                vec2(names_w, ROW_H),
-            ))
-            .layout(Layout::left_to_right(Align::Center)),
+            .max_rect(block)
+            .layout(Layout::top_down(Align::Min)),
     );
     child.set_max_width(names_w);
-    child.vertical(|ui| {
-        ui.set_max_width(names_w);
-        ui.spacing_mut().item_spacing.y = 0.0;
-        ui.add(
+    child.spacing_mut().item_spacing.y = 0.0;
+    child
+        .add(
             Label::new(
                 RichText::new(&row.name)
                     .font(theme::body())
@@ -719,17 +865,29 @@ fn name_cell(ui: &mut egui::Ui, width: f32, row: &SpaceRow, colour: Color32) {
             .truncate(),
         )
         .on_hover_text(&row.name);
-        sub_line(ui, row, names_w);
-    });
-    let names = child.min_rect();
+    sub_line(&mut child, row, names_w);
 
-    // `.space-row .swatch { margin-top: 1px }`, on the first line's own top.
-    ui.painter().rect_filled(
-        Rect::from_min_size(pos2(rect.left(), names.top() + 1.0), Vec2::splat(SWATCH)),
-        SWATCH_R,
-        colour,
-    );
+    paint_swatch(ui, rect.left(), block, name_line, colour);
     ui.add_space(COL_GAP);
+}
+
+/// Where a name cell's two lines go: the name's line over the sub line's,
+/// centred in the row. Returns the block and the name line's height.
+fn name_block(ui: &egui::Ui, left: f32, width: f32, row: Rect) -> (Rect, f32) {
+    let name = ui.fonts_mut(|fonts| fonts.row_height(&theme::body()));
+    let sub = theme::font::DETAIL * theme::font::BODY_LINE;
+    let height = name + sub;
+    (
+        Rect::from_min_size(pos2(left, row.center().y - height * 0.5), vec2(width, height)),
+        name,
+    )
+}
+
+/// `.swatch`: 8 px, centred on the name's line.
+fn paint_swatch(ui: &egui::Ui, left: f32, block: Rect, name_line: f32, colour: Color32) {
+    let top = block.top() + (name_line - SWATCH) * 0.5;
+    ui.painter()
+        .rect_filled(Rect::from_min_size(pos2(left, top), Vec2::splat(SWATCH)), SWATCH_R, colour);
 }
 
 /// `.sub`: "Shows · Farbhaus", then " · could not finish" in `--notice` when the
@@ -833,9 +991,9 @@ pub fn source_word(row: &SpaceRow) -> &'static str {
 /// The long form, on the pointer: what the short word in the row means.
 pub fn source_hint(row: &SpaceRow) -> &'static str {
     if row.walked {
-        "This figure is the sum of every file in the project, counted folder by folder."
+        "Added up file by file"
     } else {
-        "Frame.io reported this project's storage; its folders were not walked, so its files were not counted."
+        "Frame.io's figure; files not counted"
     }
 }
 
@@ -866,15 +1024,376 @@ fn project_word(projects: usize) -> String {
     }
 }
 
+// ---------- inside a project ----------
+
+/// The screen opened into a project: one folder's contents, charted and listed
+/// like the projects are, with the crumbs back up and the deletes.
+fn folder_screen(ui: &mut egui::Ui, state: &mut UiState) -> Option<Action> {
+    let mut action = None;
+    let UiState { space_open, space_folder: folder, space_accounts: accounts, .. } = state;
+    let open = space_open.as_mut()?;
+    // A ticked row that is gone, or on its way out, is not ticked any more.
+    open.selected
+        .retain(|id| folder.items.iter().any(|i| &i.id == id && !i.deleting));
+    let live: Vec<&SpaceItemRow> = folder.items.iter().filter(|i| !i.deleting).collect();
+    let deleting = folder.items.len() - live.len();
+
+    crate::app::page_head(ui, "Space", |ui| {
+        let can_refresh = folder.listed || !folder.error.is_empty();
+        if button(ui, Kind::Card, Size::Regular, Some(Glyph::Refresh), "Refresh", "Refresh", can_refresh).clicked() {
+            action = Some(Action::RefreshFolder);
+        }
+        if folder.listed && !live.is_empty() {
+            let label = if open.at_root() { EMPTY_PROJECT } else { EMPTY_FOLDER };
+            if button(ui, Kind::Card, Size::Regular, Some(Glyph::Trash), label, label, true).clicked() {
+                set_confirm(ui, Some(Confirm::empty(open, &live)));
+            }
+        }
+        let ticked: Vec<&SpaceItemRow> =
+            live.iter().copied().filter(|i| open.selected.contains(&i.id)).collect();
+        if !ticked.is_empty() {
+            let label = format!("Delete {}", ticked.len());
+            let access = format!("Delete {} selected on Frame.io", ticked.len());
+            if button(ui, Kind::Card, Size::Regular, Some(Glyph::Trash), &label, &access, true).clicked() {
+                set_confirm(ui, Some(Confirm::items(open, &ticked)));
+            }
+        }
+        if folder.listed && !folder.items.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "{} · {}",
+                    fmt_bytes(total_bytes(&folder.items)),
+                    item_word(folder.items.len())
+                ))
+                .font(theme::note())
+                .color(theme::TEXT_2),
+            );
+        }
+    });
+
+    quota_strip(ui, accounts);
+    if let Some(crumb) = crumbs(ui, open) {
+        action = Some(crumb);
+    }
+
+    if deleting > 0 {
+        status_line_with(ui, &format!("Deleting {}…", item_word(deleting)), "");
+    } else if folder.listed && folder.counting {
+        let folders = folder.items.iter().filter(|i| i.is_folder());
+        let all = folders.clone().count();
+        let done = folders.filter(|i| i.counted).count();
+        status_line_with(ui, COUNTING, &format!("{done} of {all}"));
+    } else if !folder.listed && folder.error.is_empty() {
+        status_line_with(ui, LISTING, "");
+    }
+
+    if !folder.listed {
+        if !folder.error.is_empty() && folder_block(ui, LIST_FAILED_TITLE, &folder.error, Some("Try again")) {
+            action = Some(Action::RefreshFolder);
+        }
+    } else if folder.items.is_empty() {
+        folder_block(ui, NOTHING_HERE_TITLE, "", None);
+    } else {
+        ui.add_space(BODY_TOP);
+        let stacked = ui.available_width() + SIDEBAR_W <= STACK_AT;
+        let items = &folder.items;
+        let mut entered = None;
+        if stacked {
+            chart_card(ui, items);
+            ui.add_space(BODY_GAP);
+            entered = item_card(ui, open, items, stacked);
+        } else {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = BODY_GAP;
+                chart_card(ui, items);
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    entered = item_card(ui, open, items, stacked);
+                });
+            });
+        }
+        if entered.is_some() {
+            action = entered;
+        }
+    }
+
+    if let Some(confirmed) = run_confirm(ui) {
+        action = Some(confirmed);
+    }
+    action
+}
+
+/// `All projects › Client A › Jobs`: every crumb but the last goes back to it.
+fn crumbs(ui: &mut egui::Ui, open: &SpaceOpen) -> Option<Action> {
+    let mut action = None;
+    ui.add_space(CRUMBS_TOP);
+    ui.allocate_ui_with_layout(
+        vec2(ui.available_width(), STATUS_H),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = theme::space::M;
+            if crumb(ui, ALL_PROJECTS, true) {
+                action = Some(Action::Crumb(None));
+            }
+            let last = open.trail.len().saturating_sub(1);
+            for (index, step) in open.trail.iter().enumerate() {
+                ui.label(RichText::new("›").font(theme::body()).color(theme::TEXT_3));
+                if crumb(ui, &step.name, index < last) {
+                    action = Some(Action::Crumb(Some(index)));
+                }
+            }
+        },
+    );
+    action
+}
+
+/// One crumb: `--text-2` and clickable, or the folder shown in `--text`.
+fn crumb(ui: &mut egui::Ui, name: &str, live: bool) -> bool {
+    let colour = if live { theme::TEXT_2 } else { theme::TEXT };
+    let label = Label::new(RichText::new(name).font(theme::body()).color(colour)).truncate();
+    if !live {
+        ui.add(label);
+        return false;
+    }
+    let response = ui.add(label.sense(Sense::click())).on_hover_cursor(CursorIcon::PointingHand);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Link, true, name));
+    response.clicked()
+}
+
+/// The empty block's shape for a folder: nothing in it, or a listing that
+/// failed (with the button that tries again). Returns true when it was pressed.
+fn folder_block(ui: &mut egui::Ui, title: &str, sub: &str, retry: Option<&str>) -> bool {
+    ui.add_space(EMPTY_TOP);
+    let mut pressed = false;
+    ui.vertical_centered(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(theme::size::EMPTY_ICON), Sense::hover());
+        let painter = ui.painter();
+        painter.rect_filled(rect, theme::R_EMPTY, theme::CARD);
+        painter.rect_stroke(rect, theme::R_EMPTY, theme::stroke_border(), StrokeKind::Inside);
+        paint_glyph(painter, rect, Glyph::Donut, theme::TEXT_3, theme::icon::EMPTY);
+        ui.add_space(EMPTY_ICON_GAP);
+        ui.add(Label::new(RichText::new(title).font(theme::section()).color(theme::TEXT).strong()));
+        if !sub.is_empty() {
+            ui.add_space(EMPTY_TITLE_GAP);
+            ui.add(Label::new(RichText::new(sub).font(theme::body()).color(theme::TEXT_3)).wrap());
+        }
+        if let Some(label) = retry {
+            ui.add_space(EMPTY_BTN_GAP);
+            pressed = button(ui, Kind::Card, Size::Regular, None, label, label, true).clicked();
+        }
+    });
+    pressed
+}
+
+/// The legend inside a project: a checkbox column, then the same columns as the
+/// project list. Returns `Enter` when a folder's row was clicked.
+fn item_card(ui: &mut egui::Ui, open: &mut SpaceOpen, items: &[SpaceItemRow], narrow: bool) -> Option<Action> {
+    let mut action = None;
+    theme::panel_card_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let columns = columns(ui.available_width(), narrow);
+        item_head(ui, &columns, open, items);
+        for (index, item) in items.iter().enumerate() {
+            if let Some(entered) = item_row(ui, index, item, &columns, open) {
+                action = Some(entered);
+            }
+        }
+    });
+    action
+}
+
+/// The head: "Select all" over the checkboxes, then Name, Size, Files.
+fn item_head(ui: &mut egui::Ui, columns: &Columns, open: &mut SpaceOpen, items: &[SpaceItemRow]) {
+    let live: Vec<&str> = items.iter().filter(|i| !i.deleting).map(|i| i.id.as_str()).collect();
+    let ticked = live.iter().filter(|id| open.selected.contains(**id)).count();
+    strip(ui, HEAD_H, false, |ui, _hovered| {
+        cell(ui, columns.name, HEAD_H, false, |ui| {
+            // The rows' checkbox slot, so "Name" lands on the swatches' edge.
+            let (slot, _) = ui.allocate_exact_size(vec2(CHECK_W, HEAD_H), Sense::hover());
+            let mut boxed = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(slot)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            boxed.spacing_mut().interact_size.y = theme::size::CHECK;
+            let mut all = !live.is_empty() && ticked == live.len();
+            let check = boxed.add_enabled(
+                !live.is_empty(),
+                Checkbox::without_text(&mut all).indeterminate(ticked > 0 && ticked < live.len()),
+            );
+            check.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, !live.is_empty(), all, "Select all"));
+            if check.changed() {
+                if all {
+                    open.selected.extend(live.iter().map(|id| id.to_string()));
+                } else {
+                    open.selected.clear();
+                }
+            }
+            head_label(ui, "Name", false);
+        });
+        cell(ui, columns.size, HEAD_H, true, |ui| head_label(ui, "Size", true));
+        cell(ui, columns.files, HEAD_H, true, |ui| head_label(ui, "Files", true));
+        cell(ui, columns.actions, HEAD_H, false, |_ui| {});
+    });
+}
+
+/// One thing in the folder: its checkbox, swatch, name and kind, size, file
+/// count, Delete, and for a folder the chevron that says the row opens it.
+fn item_row(
+    ui: &mut egui::Ui,
+    index: usize,
+    item: &SpaceItemRow,
+    columns: &Columns,
+    open: &mut SpaceOpen,
+) -> Option<Action> {
+    let colour = if item.held() > 0 { space_color(index) } else { theme::RAISED };
+    let enters = item.is_folder() && !item.deleting;
+    let name = enters.then(|| format!("Open {}", item.name));
+    let clicked = strip_with(ui, ROW_H, !item.deleting, name.as_deref(), |ui, hovered| {
+        item_name_cell(ui, columns.name, item, colour, open);
+        cell(ui, columns.size, ROW_H, true, |ui| {
+            // A folder the walk has not reached yet: its size is on its way.
+            let size = if item.counted { fmt_bytes(item.bytes) } else { "…".to_string() };
+            ui.add(Label::new(RichText::new(size).font(theme::body()).color(theme::TEXT_2)));
+        });
+        cell(ui, columns.files, ROW_H, true, |ui| {
+            // Only a folder has a count; a file is one.
+            if item.is_folder() && item.counted {
+                ui.add(Label::new(
+                    RichText::new(item.files.max(0).to_string()).font(theme::body()).color(theme::TEXT_2),
+                ));
+            }
+        });
+        cell(ui, columns.actions, ROW_H, false, |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                chevron(ui, enters, hovered);
+                if !item.deleting
+                    && delete_button(ui, &format!("Delete {} on Frame.io", item.name), hovered)
+                {
+                    set_confirm(ui, Some(Confirm::items(open, &[item])));
+                }
+            });
+        });
+    });
+    clicked.then(|| Action::Enter { id: item.id.clone(), name: item.name.clone() })
+}
+
+/// The name cell inside a project: the checkbox, then the swatch and the two
+/// lines, as [`name_cell`] draws them for a project.
+fn item_name_cell(ui: &mut egui::Ui, width: f32, item: &SpaceItemRow, colour: Color32, open: &mut SpaceOpen) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::hover());
+    let left = rect.left() + CHECK_W + COL_GAP;
+    let inset = SWATCH + COL_GAP;
+    let names_w = (rect.right() - left - inset).max(0.0);
+    let (block, name_line) = name_block(ui, left + inset, names_w, rect);
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(block)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    child.set_max_width(names_w);
+    child.spacing_mut().item_spacing.y = 0.0;
+    child
+        .add(Label::new(RichText::new(&item.name).font(theme::body()).color(theme::TEXT)).truncate())
+        .on_hover_text(&item.name);
+    item_sub_line(&mut child, item, names_w);
+    paint_swatch(ui, left, block, name_line, colour);
+
+    // The checkbox, centred in the row with the two lines it ticks.
+    let mut check = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_x_y_ranges(rect.left()..=rect.left() + CHECK_W, rect.y_range()))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    check.spacing_mut().interact_size.y = theme::size::CHECK;
+    let mut on = open.selected.contains(&item.id);
+    let response = check.add_enabled(!item.deleting, Checkbox::without_text(&mut on));
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::Checkbox, !item.deleting, on, format!("Select {}", item.name))
+    });
+    if response.changed() {
+        if on {
+            open.selected.insert(item.id.clone());
+        } else {
+            open.selected.remove(&item.id);
+        }
+    }
+    ui.add_space(COL_GAP);
+}
+
+/// `.sub` inside a project: what the row is, then what is going on with it. The
+/// line is as tall as a project row's, so both lists' names sit alike.
+fn item_sub_line(ui: &mut egui::Ui, item: &SpaceItemRow, width: f32) {
+    let (words, colour, hover) = item_sub(item);
+    let line = theme::font::DETAIL * theme::font::BODY_LINE;
+    ui.allocate_ui_with_layout(vec2(width, line), Layout::left_to_right(Align::Center), |ui| {
+        ui.set_max_width(width);
+        let response = ui.add(Label::new(RichText::new(words).font(theme::detail()).color(colour)).truncate());
+        if let Some(hover) = hover {
+            response.on_hover_text(hover);
+        }
+    });
+}
+
+/// The sub line's words, colour and pointer text, in order of what matters
+/// most: a delete on its way, a walk that could not finish, the watch folders
+/// that use it, a size still being added up.
+pub fn item_sub(item: &SpaceItemRow) -> (String, Color32, Option<String>) {
+    let kind = match item.kind.as_str() {
+        "folder" => "Folder",
+        "version_stack" => "Version stack",
+        _ => "File",
+    };
+    if item.deleting {
+        return (format!("{kind} · deleting…"), theme::TEXT_3, None);
+    }
+    if !item.error.trim().is_empty() {
+        return (format!("{kind} · could not finish"), theme::NOTICE, Some(item.error.clone()));
+    }
+    if !item.watches.is_empty() {
+        let words = match item.watches.len() {
+            1 => format!("{kind} · watch folder {}", item.watches[0]),
+            n => format!("{kind} · {n} watch folders"),
+        };
+        return (words, theme::TEXT_3, Some(item.watches.join(", ")));
+    }
+    if !item.counted {
+        return (format!("{kind} · counting…"), theme::TEXT_3, None);
+    }
+    (kind.to_string(), theme::TEXT_3, None)
+}
+
 // ---------- rows and cells ----------
 
 /// One full-width strip: the hover wash, the 1 px bottom border and the row
 /// padding, with a child `Ui` laid out left to right. The closure is told
 /// whether the row is under the pointer, so an action can react to it.
 fn strip(ui: &mut egui::Ui, height: f32, hoverable: bool, add: impl FnOnce(&mut egui::Ui, bool)) {
+    strip_with(ui, height, hoverable, None, add);
+}
+
+/// A strip that opens something when clicked, `open` being its accessible
+/// name. The controls drawn inside it sit on top and keep their own clicks.
+/// Returns true when the strip itself was clicked.
+fn strip_with(
+    ui: &mut egui::Ui,
+    height: f32,
+    hoverable: bool,
+    open: Option<&str>,
+    add: impl FnOnce(&mut egui::Ui, bool),
+) -> bool {
     let width = ui.available_width().max(0.0);
-    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-    let hovered = hoverable && response.hovered();
+    let sense = if open.is_some() { Sense::click() } else { Sense::hover() };
+    let (rect, mut response) = ui.allocate_exact_size(vec2(width, height), sense);
+    if let Some(name) = open {
+        response = response.on_hover_cursor(CursorIcon::PointingHand);
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
+    }
+    // `contains_pointer`, not `hovered`: the wash stays while the pointer is on
+    // the row's own Delete.
+    let hovered = hoverable && response.contains_pointer();
     if hovered {
         // `.row:hover { background: #ffffff05 }`
         ui.painter()
@@ -890,6 +1409,7 @@ fn strip(ui: &mut egui::Ui, height: f32, hoverable: bool, add: impl FnOnce(&mut 
     // `.row { border-bottom: 1px solid var(--border) }`, inside the 57 px pitch.
     ui.painter()
         .hline(rect.x_range(), rect.bottom() - 1.0, theme::hairline(theme::BORDER));
+    response.clicked()
 }
 
 /// A fixed-width column of a row.
@@ -938,6 +1458,8 @@ enum Glyph {
     Donut,
     /// `.icon-btn` close cross.
     Close,
+    /// A row that opens: "M8 5.5l4.5 4.5L8 14.5".
+    Chevron,
 }
 
 /// One `.btn`: measured from its words, painted by hand so the glyph and the
@@ -1029,7 +1551,7 @@ fn button(
 
 /// The row's Delete: `.btn.sm.subtle.danger.space-del` — trash, then the word,
 /// turning `--error-text` when the row is under the pointer.
-fn delete_button(ui: &mut egui::Ui, row: &SpaceRow, row_hovered: bool) -> bool {
+fn delete_button(ui: &mut egui::Ui, access: &str, row_hovered: bool) -> bool {
     let font = theme::detail();
     let text_w = ui
         .painter()
@@ -1061,14 +1583,19 @@ fn delete_button(ui: &mut egui::Ui, row: &SpaceRow, row_hovered: bool) -> bool {
         font,
         colour,
     );
-    response.widget_info(|| {
-        WidgetInfo::labeled(
-            WidgetType::Button,
-            true,
-            format!("Delete {} on Frame.io", row.name),
-        )
-    });
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, access));
     response.clicked()
+}
+
+/// The `›` at a row's right edge that says the row opens. A row that does not
+/// open keeps the slot empty, so every Delete stays in one column.
+fn chevron(ui: &mut egui::Ui, opens: bool, row_hovered: bool) {
+    let (rect, _) = ui.allocate_exact_size(vec2(CHEVRON, BTN_SM_H), Sense::hover());
+    if opens {
+        let colour = if row_hovered { theme::TEXT } else { theme::TEXT_3 };
+        paint_glyph(ui.painter(), rect, Glyph::Chevron, colour, GLYPH_SM);
+    }
+    ui.add_space(CHEVRON_GAP);
 }
 
 /// `.icon-btn`: 28 x 28, transparent, `--text-3` until hovered. Used by the
@@ -1150,13 +1677,16 @@ fn paint_glyph(painter: &Painter, rect: Rect, glyph: Glyph, colour: Color32, siz
             painter.line_segment([p(6.0, 6.0), p(14.0, 14.0)], stroke);
             painter.line_segment([p(14.0, 6.0), p(6.0, 14.0)], stroke);
         }
+        Glyph::Chevron => {
+            painter.add(Shape::line(vec![p(8.0, 5.5), p(12.5, 10.0), p(8.0, 14.5)], stroke));
+        }
     }
 }
 
 // ---------- the empty state ----------
 
-/// `.empty`: the donut tile, a title, a sub line, and the button that gets the
-/// screen out of that state. Returns true when the button asked for a walk.
+/// `.empty`: the donut tile, a title, and the button that gets the screen out
+/// of that state. Returns true when the button asked for a walk.
 fn empty_state(ui: &mut egui::Ui, view: &mut View, logged_in: bool, walking: bool) -> bool {
     ui.add_space(EMPTY_TOP);
     let mut refresh = false;
@@ -1170,12 +1700,12 @@ fn empty_state(ui: &mut egui::Ui, view: &mut View, logged_in: bool, walking: boo
         paint_glyph(painter, rect, Glyph::Donut, theme::TEXT_3, theme::icon::EMPTY);
         ui.add_space(EMPTY_ICON_GAP);
 
-        let (title, sub, action_label) = if !logged_in {
-            (EMPTY_SIGNED_OUT_TITLE, EMPTY_SIGNED_OUT_SUB, Some("Open Settings"))
+        let (title, action_label) = if !logged_in {
+            (EMPTY_SIGNED_OUT_TITLE, Some("Open Settings"))
         } else if walking {
-            (EMPTY_WALKING_TITLE, EMPTY_WALKING_SUB, None)
+            (EMPTY_WALKING_TITLE, None)
         } else {
-            (EMPTY_TITLE, EMPTY_SUB, Some("Refresh"))
+            (EMPTY_TITLE, Some("Refresh"))
         };
 
         ui.add(Label::new(
@@ -1183,10 +1713,6 @@ fn empty_state(ui: &mut egui::Ui, view: &mut View, logged_in: bool, walking: boo
                 .font(theme::section())
                 .color(theme::TEXT)
                 .strong(),
-        ));
-        ui.add_space(EMPTY_TITLE_GAP);
-        ui.add(Label::new(
-            RichText::new(sub).font(theme::body()).color(theme::TEXT_3),
         ));
 
         if let Some(label) = action_label {
@@ -1205,39 +1731,187 @@ fn empty_state(ui: &mut egui::Ui, view: &mut View, logged_in: bool, walking: boo
 
 // ---------- the confirmation ----------
 
-/// The project a confirmation is open for, as the row said it when its Delete
-/// was pressed.
+/// What a confirmation is open for, worded as the rows said it when the button
+/// was pressed. The dialog draws these words and nothing else, and the delete it
+/// reports is [`Target`], so a folder that changes behind the dialog cannot
+/// change what goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Confirm {
-    account_id: String,
-    account_name: String,
-    project_id: String,
-    workspace_name: String,
-    name: String,
-    bytes: i64,
-    files: i64,
+    title: String,
+    /// `.edit-row`s: label, value, and the value's colour.
+    rows: Vec<(String, String, Color32)>,
+    /// Watch folders whose Frame.io folder this deletes.
+    watches: Vec<String>,
+    button: String,
+    target: Target,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    Project {
+        account_id: String,
+        project_id: String,
+        name: String,
+    },
+    Items {
+        account_id: String,
+        project_id: String,
+        folder_id: String,
+        items: Vec<SpaceTarget>,
+        what: String,
+    },
+}
+
+impl Target {
+    fn into_action(self) -> Action {
+        match self {
+            Target::Project { account_id, project_id, name } => Action::Delete { account_id, project_id, name },
+            Target::Items { account_id, project_id, folder_id, items, what } => {
+                Action::DeleteItems { account_id, project_id, folder_id, items, what }
+            }
+        }
+    }
 }
 
 impl Confirm {
     fn from_row(row: &SpaceRow) -> Self {
-        Confirm {
-            account_id: row.account_id.clone(),
-            account_name: row.account_name.clone(),
-            project_id: row.project_id.clone(),
+        let place = where_line(&SpaceRow {
             workspace_name: row.workspace_name.clone(),
-            name: row.name.clone(),
-            bytes: row.bytes,
-            files: row.files,
+            account_name: row.account_name.clone(),
+            ..SpaceRow::default()
+        });
+        Confirm {
+            title: CONFIRM_TITLE.into(),
+            rows: vec![
+                ("Project".into(), row.name.clone(), theme::TEXT),
+                ("Size".into(), format!("{} · {}", fmt_bytes(row.bytes), file_word(row.files)), theme::TEXT),
+                ("On Frame.io".into(), place, theme::TEXT_2),
+            ],
+            watches: Vec::new(),
+            button: CONFIRM_DELETE.into(),
+            target: Target::Project {
+                account_id: row.account_id.clone(),
+                project_id: row.project_id.clone(),
+                name: row.name.clone(),
+            },
         }
     }
 
-    /// The dialog's "On Frame.io" row.
-    fn place(&self) -> String {
-        where_line(&SpaceRow {
-            workspace_name: self.workspace_name.clone(),
-            account_name: self.account_name.clone(),
-            ..SpaceRow::default()
-        })
+    /// The Delete of one row, or of the ticked rows.
+    fn items(open: &SpaceOpen, picked: &[&SpaceItemRow]) -> Self {
+        let (title, first, what) = match picked {
+            [one] => {
+                let (title, label) = if one.is_folder() {
+                    ("Delete folder on Frame.io?", "Folder")
+                } else {
+                    ("Delete file on Frame.io?", "File")
+                };
+                (title.to_string(), (label.to_string(), one.name.clone()), one.name.clone())
+            }
+            _ => (
+                format!("Delete {} on Frame.io?", item_word(picked.len())),
+                ("Items".to_string(), names_line(picked)),
+                item_word(picked.len()),
+            ),
+        };
+        Confirm {
+            title,
+            rows: vec![
+                (first.0, first.1, theme::TEXT),
+                ("Size".into(), size_words(picked), theme::TEXT),
+                ("On Frame.io".into(), trail_line(open), theme::TEXT_2),
+            ],
+            watches: watches_of(picked),
+            button: CONFIRM_DELETE.into(),
+            target: Target::Items {
+                account_id: open.account_id.clone(),
+                project_id: open.project_id.clone(),
+                folder_id: open.folder().id.clone(),
+                items: picked.iter().map(|i| i.target()).collect(),
+                what,
+            },
+        }
+    }
+
+    /// "Empty project": everything the folder lists, and the folder stays.
+    fn empty(open: &SpaceOpen, all: &[&SpaceItemRow]) -> Self {
+        let here = open.folder();
+        let label = if open.at_root() { "Project" } else { "Folder" };
+        // Where the emptied folder itself lives: the project's workspace and
+        // account, or the folders above it.
+        let place = if open.at_root() {
+            where_line(&SpaceRow {
+                workspace_name: open.workspace_name.clone(),
+                account_name: open.account_name.clone(),
+                ..SpaceRow::default()
+            })
+        } else {
+            let above = &open.trail[..open.trail.len() - 1];
+            above.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" › ")
+        };
+        Confirm {
+            title: format!("Empty {} on Frame.io?", here.name),
+            rows: vec![
+                (label.into(), here.name.clone(), theme::TEXT),
+                ("Deletes".into(), format!("All {}", item_word(all.len())), theme::TEXT),
+                ("Size".into(), size_words(all), theme::TEXT),
+                ("On Frame.io".into(), place, theme::TEXT_2),
+            ],
+            watches: watches_of(all),
+            button: CONFIRM_EMPTY.into(),
+            target: Target::Items {
+                account_id: open.account_id.clone(),
+                project_id: open.project_id.clone(),
+                folder_id: here.id.clone(),
+                items: all.iter().map(|i| i.target()).collect(),
+                what: format!("everything in {}", here.name),
+            },
+        }
+    }
+}
+
+/// "Jobs, Old cuts, Rushes and 4 more".
+fn names_line(picked: &[&SpaceItemRow]) -> String {
+    let names: Vec<&str> = picked.iter().take(NAMES_SHOWN).map(|i| i.name.as_str()).collect();
+    match picked.len().saturating_sub(NAMES_SHOWN) {
+        0 => names.join(", "),
+        more => format!("{} and {more} more", names.join(", ")),
+    }
+}
+
+/// What the rows hold: "1.20 GB · 312 files", with "so far" while a folder in
+/// them has not been added up.
+fn size_words(rows: &[&SpaceItemRow]) -> String {
+    let bytes: i64 = rows.iter().map(|i| i.held().max(0)).sum();
+    let files: i64 = rows.iter().filter(|i| i.counted).map(|i| i.files.max(0)).sum();
+    let counting = rows.iter().any(|i| !i.counted);
+    match (counting, rows) {
+        (true, _) => format!("{} so far", fmt_bytes(bytes)),
+        (false, [one]) if !one.is_folder() => fmt_bytes(bytes),
+        _ => format!("{} · {}", fmt_bytes(bytes), file_word(files)),
+    }
+}
+
+/// The dialog's "On Frame.io" row inside a project: "Client A › Jobs".
+fn trail_line(open: &SpaceOpen) -> String {
+    open.trail.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" › ")
+}
+
+fn watches_of(rows: &[&SpaceItemRow]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in rows.iter().flat_map(|i| i.watches.iter()) {
+        if !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
+/// "1 item", "14 items".
+fn item_word(items: usize) -> String {
+    match items {
+        1 => "1 item".to_string(),
+        n => format!("{n} items"),
     }
 }
 
@@ -1266,8 +1940,7 @@ enum Decision {
     Delete,
 }
 
-/// `.modal-box.small`: the project, what it holds, where it lives, and the one
-/// sentence that says what a delete here does — and does not — touch.
+/// `.modal-box.small`: what goes, what it holds and where it lives.
 ///
 /// Cancel is the default in the three ways a dialog can say it: it takes the
 /// keyboard focus when the dialog opens, Enter takes it, and so do Escape and a
@@ -1298,7 +1971,7 @@ fn confirm_dialog(ctx: &egui::Context, confirm: &Confirm) -> Decision {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = theme::space::M;
                         ui.add(Label::new(
-                            RichText::new(CONFIRM_TITLE)
+                            RichText::new(&confirm.title)
                                 .font(theme::section())
                                 .color(theme::TEXT)
                                 .strong(),
@@ -1322,37 +1995,19 @@ fn confirm_dialog(ctx: &egui::Context, confirm: &Confirm) -> Decision {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = theme::space::L;
-                    edit_row(ui, "Project", &confirm.name, theme::TEXT);
-                    edit_row(
-                        ui,
-                        "Size",
-                        &format!("{} · {}", fmt_bytes(confirm.bytes), file_word(confirm.files)),
-                        theme::TEXT,
-                    );
-                    edit_row(ui, "On Frame.io", &confirm.place(), theme::TEXT_2);
-                    ui.add_space(theme::space::XS);
-                    // `.space-warn-box`: the sentence the dialog exists for.
-                    egui::Frame::new()
-                        .fill(theme::SURFACE)
-                        .stroke(theme::stroke_border_2())
-                        .corner_radius(theme::R_S)
-                        .inner_margin(Margin {
-                            left: 12,
-                            right: 12,
-                            top: 10,
-                            bottom: 10,
-                        })
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.add(
-                                Label::new(
-                                    RichText::new(NOTHING_LOCAL)
-                                        .font(theme::note())
-                                        .color(theme::TEXT_2),
-                                )
-                                .wrap(),
-                            );
-                        });
+                    for (label, value, colour) in &confirm.rows {
+                        edit_row(ui, label, value, *colour);
+                    }
+                    if !confirm.watches.is_empty() {
+                        // The one consequence away from Frame.io: a watch whose
+                        // folder goes stops until it is given another.
+                        edit_row(
+                            ui,
+                            "Watch folders",
+                            &format!("{} · will stop", confirm.watches.join(", ")),
+                            theme::NOTICE,
+                        );
+                    }
                 });
 
             // `.modal-foot { border-top: 1px solid var(--border); padding: 12px 14px }`,
@@ -1373,8 +2028,8 @@ fn confirm_dialog(ctx: &egui::Context, confirm: &Confirm) -> Decision {
                             Kind::DangerSolid,
                             Size::Regular,
                             None,
-                            CONFIRM_DELETE,
-                            CONFIRM_DELETE,
+                            &confirm.button,
+                            &confirm.button,
                             true,
                         );
                         let cancel = button(
@@ -1428,7 +2083,7 @@ fn edit_row(ui: &mut egui::Ui, label: &str, value: &str, colour: Color32) {
             theme::detail(),
             theme::TEXT_3,
         );
-        ui.add(Label::new(RichText::new(value).font(theme::body()).color(colour)));
+        ui.add(Label::new(RichText::new(value).font(theme::body()).color(colour)).wrap());
     });
 }
 
@@ -1448,6 +2103,7 @@ mod tests {
             workspace_name: workspace.into(),
             project_id: format!("proj-{}", name.to_lowercase().replace(' ', "-")),
             name: name.into(),
+            root_folder_id: format!("root-{}", name.to_lowercase().replace(' ', "-")),
             bytes,
             files,
             walked: true,
@@ -1522,7 +2178,6 @@ mod tests {
         let (harness, seen) = screen(state_with(Vec::new()));
 
         harness.get_by_label(EMPTY_TITLE);
-        harness.get_by_label(EMPTY_SUB);
         // The head's Refresh, and the one in the middle of the empty block.
         assert_eq!(harness.get_all_by_label("Refresh").count(), 2);
         // No chart, so no legend and no total.
@@ -1560,7 +2215,6 @@ mod tests {
         let (mut harness, seen) = screen(state);
 
         harness.get_by_label(EMPTY_SIGNED_OUT_TITLE);
-        harness.get_by_label(EMPTY_SIGNED_OUT_SUB);
         assert!(harness.query_by_label(EMPTY_TITLE).is_none());
 
         harness.get_by_label("Open Settings").click();
@@ -1643,8 +2297,8 @@ mod tests {
         let (mut harness, seen) = screen(state);
         harness.run_steps(2);
 
-        // The status line says what is being walked, and what it does not do.
-        harness.get_by_label("Adding up every project. Nothing is downloaded, nothing is deleted.");
+        // The status line says a walk is running.
+        harness.get_by_label(EMPTY_WALKING_TITLE);
         // The last walk's figures stay on screen while the new one runs.
         harness.get_by_label("Rushes 2026");
 
@@ -1675,7 +2329,6 @@ mod tests {
             2,
             "the status line and the empty block both say it"
         );
-        harness.get_by_label(EMPTY_WALKING_SUB);
         assert!(
             harness.query_by_label(EMPTY_TITLE).is_none(),
             "a walk in progress is not the same as nothing to count"
@@ -1788,8 +2441,6 @@ mod tests {
             harness.get_all_by_label("Shows · Farbhaus").count() >= 2,
             "the dialog names the place as well"
         );
-        // The sentence that says what a delete here touches.
-        harness.get_by_label(NOTHING_LOCAL);
         harness.get_by_label(CONFIRM_DELETE);
         harness.get_by_label(CONFIRM_CANCEL);
 
@@ -1940,7 +2591,7 @@ mod tests {
         assert_eq!(pieces[0].span, 360.0);
 
         // Nothing measured at all: no ring, just the track.
-        assert!(slices(&[]).is_empty());
+        assert!(slices::<SpaceRow>(&[]).is_empty());
         assert!(slices(&[project("Zero", "Shows", 0, 0)]).is_empty());
     }
 
@@ -1972,7 +2623,7 @@ mod tests {
     fn the_totals_are_the_sum_of_the_rows() {
         let rows = three_projects();
         assert_eq!(total_bytes(&rows), 1_254_000_000);
-        assert_eq!(total_bytes(&[]), 0);
+        assert_eq!(total_bytes::<SpaceRow>(&[]), 0);
         // A row the walk never measured adds nothing.
         assert_eq!(total_bytes(&[project("Negative", "Shows", -5, 0)]), 0);
     }
@@ -2269,9 +2920,351 @@ mod tests {
         harness.get_by_label("1284");
         assert!(harness.query_by_label("from Frame.io").is_none());
     }
+
+    // ---------- inside a project ----------
+
+    fn item(id: &str, kind: &str, name: &str, bytes: i64, files: i64) -> SpaceItemRow {
+        SpaceItemRow {
+            id: id.into(),
+            kind: kind.into(),
+            name: name.into(),
+            bytes,
+            files,
+            counted: true,
+            ..SpaceItemRow::default()
+        }
+    }
+
+    /// "Client A" opened: two job folders, one still being counted, a file.
+    fn client_items() -> Vec<SpaceItemRow> {
+        vec![
+            item("f-jobs", "folder", "Jobs 2026", 3_000_000_000, 120),
+            item("f-old", "folder", "Old jobs", 900_000_000, 40),
+            SpaceItemRow { counted: false, ..item("f-new", "folder", "New job", 0, 0) },
+            item("file-1", "file", "Brief.pdf", 7_000_000, 1),
+        ]
+    }
+
+    fn opened(items: Vec<SpaceItemRow>) -> UiState {
+        UiState {
+            logged_in: true,
+            space: vec![project("Client A", "Shows", 3_907_000_000, 0)],
+            space_open: Some(SpaceOpen {
+                account_id: "acct-1".into(),
+                account_name: "Farbhaus".into(),
+                workspace_name: "Shows".into(),
+                project_id: "proj-client-a".into(),
+                trail: vec![SpaceCrumb { id: "root-client-a".into(), name: "Client A".into() }],
+                selected: Default::default(),
+            }),
+            space_folder: SpaceFolderView { items, listed: true, counting: false, error: String::new() },
+            ..UiState::default()
+        }
+    }
+
+    fn deeper(mut state: UiState) -> UiState {
+        state.space_open.as_mut().unwrap().enter("f-jobs", "Jobs 2026");
+        state.space_folder.items = vec![item("f-cut", "folder", "Cut A", 2_000_000, 3)];
+        state
+    }
+
+    /// Clicks, then draws a few frames. Not `run`: a status line's spinner
+    /// keeps asking for frames while something is listed, counted or deleted.
+    fn press(harness: &mut Harness<'static, UiState>, label: &str) {
+        harness.get_by_label(label).click();
+        harness.run_steps(3);
+    }
+
+    fn open_dialog(harness: &mut Harness<'static, UiState>, label: &str) {
+        press(harness, label);
+    }
+
+    #[test]
+    fn a_project_row_opens_the_project() {
+        let mut harness = app_screen(state_with(three_projects()));
+
+        press(&mut harness, "Open Nightfall");
+
+        let state = harness.state();
+        let open = state.space_open.as_ref().expect("the project is open");
+        assert_eq!(open.project_id, "proj-nightfall");
+        assert_eq!(open.trail, vec![SpaceCrumb { id: "root-nightfall".into(), name: "Nightfall".into() }]);
+        assert!(
+            state.requests.contains(&Request::OpenSpaceFolder {
+                account_id: "acct-1".into(),
+                folder_id: "root-nightfall".into(),
+                parent: None,
+            }),
+            "requests: {:?}",
+            state.requests
+        );
+    }
+
+    #[test]
+    fn a_project_row_s_delete_still_deletes_the_project() {
+        // The row opens on a click, and its Delete sits on top of it.
+        let (mut harness, _) = screen(state_with(three_projects()));
+        open_dialog(&mut harness, "Delete Nightfall on Frame.io");
+        harness.get_by_label(CONFIRM_TITLE);
+        assert!(harness.state().space_open.is_none(), "Delete must not open the project");
+    }
+
+    #[test]
+    fn a_project_without_a_root_folder_does_not_open() {
+        let mut row = project("Nightfall", "Shows", 1_000, 1);
+        row.root_folder_id.clear();
+        let (harness, _) = screen(state_with(vec![row]));
+        assert!(harness.query_by_label("Open Nightfall").is_none());
+    }
+
+    #[test]
+    fn an_opened_project_lists_what_its_root_holds() {
+        let mut state = opened(client_items());
+        state.space_folder.counting = true;
+        let (harness, _) = screen(state);
+
+        harness.get_by_label(ALL_PROJECTS);
+        harness.get_by_label("Client A");
+        harness.get_by_label("Jobs 2026");
+        harness.get_by_label("3.00 GB");
+        harness.get_by_label("120");
+        // A folder still being counted has no size yet, and says so.
+        harness.get_by_label("…");
+        harness.get_by_label("Folder · counting…");
+        harness.get_by_label("File");
+        harness.get_by_label(COUNTING);
+        harness.get_by_label("2 of 3");
+        harness.get_by_label(EMPTY_PROJECT);
+        // Folders open, files do not.
+        harness.get_by_label("Open Jobs 2026");
+        assert!(harness.query_by_label("Open Brief.pdf").is_none());
+    }
+
+    #[test]
+    fn a_folder_row_goes_into_the_folder() {
+        let mut harness = app_screen(opened(client_items()));
+
+        press(&mut harness, "Open Jobs 2026");
+
+        let state = harness.state();
+        let open = state.space_open.as_ref().unwrap();
+        assert_eq!(open.folder().id, "f-jobs");
+        assert_eq!(open.trail.len(), 2);
+        assert!(state.space_folder.items.is_empty(), "the last folder's rows are dropped at once");
+        assert!(
+            state.requests.contains(&Request::OpenSpaceFolder {
+                account_id: "acct-1".into(),
+                folder_id: "f-jobs".into(),
+                parent: Some("root-client-a".into()),
+            }),
+            "requests: {:?}",
+            state.requests
+        );
+    }
+
+    #[test]
+    fn the_crumbs_go_back_up() {
+        let mut harness = app_screen(deeper(opened(client_items())));
+        harness.get_by_label("Jobs 2026");
+        harness.get_by_label(EMPTY_FOLDER);
+
+        press(&mut harness, "Client A");
+        assert_eq!(harness.state().space_open.as_ref().unwrap().trail.len(), 1);
+        assert!(harness.state().requests.contains(&Request::OpenSpaceFolder {
+            account_id: "acct-1".into(),
+            folder_id: "root-client-a".into(),
+            parent: None,
+        }));
+
+        press(&mut harness, ALL_PROJECTS);
+        assert!(harness.state().space_open.is_none(), "back to the project list");
+    }
+
+    #[test]
+    fn refresh_inside_a_project_walks_the_folder_again() {
+        let mut harness = app_screen(deeper(opened(client_items())));
+        harness.get_by_label("Refresh").click();
+        harness.run();
+        assert!(harness.state().requests.contains(&Request::RefreshSpaceFolder {
+            account_id: "acct-1".into(),
+            folder_id: "f-jobs".into(),
+            parent: Some("root-client-a".into()),
+        }));
+    }
+
+    #[test]
+    fn a_row_s_delete_confirms_that_one_folder() {
+        let (mut harness, seen) = screen(opened(client_items()));
+        open_dialog(&mut harness, "Delete Old jobs on Frame.io");
+
+        harness.get_by_label("Delete folder on Frame.io?");
+        harness.get_by_label("900 MB · 40 files");
+        harness.get_by_label(CONFIRM_DELETE).click();
+        harness.run();
+
+        assert_eq!(
+            seen.borrow().as_slice(),
+            &[Action::DeleteItems {
+                account_id: "acct-1".into(),
+                project_id: "proj-client-a".into(),
+                folder_id: "root-client-a".into(),
+                items: vec![SpaceTarget { id: "f-old".into(), kind: "folder".into(), name: "Old jobs".into() }],
+                what: "Old jobs".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn cancel_is_the_default_inside_a_project_too() {
+        let (mut harness, seen) = screen(opened(client_items()));
+        open_dialog(&mut harness, EMPTY_PROJECT);
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        harness.run();
+        assert!(seen.borrow().is_empty(), "Enter must not delete: {:?}", seen.borrow());
+        assert!(harness.query_by_label(CONFIRM_EMPTY).is_none(), "the dialog closed");
+    }
+
+    #[test]
+    fn ticked_rows_are_deleted_together() {
+        let mut harness = app_screen(opened(client_items()));
+        harness.get_by_label("Select Jobs 2026").click();
+        harness.run();
+        harness.get_by_label("Select Brief.pdf").click();
+        harness.run();
+        assert_eq!(harness.state().space_open.as_ref().unwrap().selected.len(), 2);
+
+        open_dialog(&mut harness, "Delete 2 selected on Frame.io");
+        harness.get_by_label("Delete 2 items on Frame.io?");
+        harness.get_by_label("Jobs 2026, Brief.pdf");
+        harness.get_by_label("3.01 GB · 121 files");
+        harness.get_by_label(CONFIRM_DELETE).click();
+        harness.run();
+
+        let state = harness.state();
+        let asked = state.requests.iter().find_map(|r| match r {
+            Request::DeleteSpaceItems { items, what, .. } => Some((items.clone(), what.clone())),
+            _ => None,
+        });
+        let (items, what) = asked.expect("the delete was asked for");
+        let ids: Vec<&str> = items.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["f-jobs", "file-1"], "the ticked rows, in row order");
+        assert_eq!(what, "2 items");
+        assert!(state.space_open.as_ref().unwrap().selected.is_empty(), "nothing stays ticked");
+    }
+
+    #[test]
+    fn select_all_ticks_every_row_not_being_deleted() {
+        let mut items = client_items();
+        items[1].deleting = true;
+        let mut harness = app_screen(opened(items));
+        press(&mut harness, "Select all");
+        let selected = &harness.state().space_open.as_ref().unwrap().selected;
+        assert_eq!(selected.len(), 3);
+        assert!(!selected.contains("f-old"));
+    }
+
+    #[test]
+    fn empty_project_deletes_everything_listed_and_keeps_the_project() {
+        let mut items = client_items();
+        items[3].deleting = true; // already on its way: not asked for twice
+        let (mut harness, seen) = screen(opened(items));
+        open_dialog(&mut harness, EMPTY_PROJECT);
+
+        harness.get_by_label("Empty Client A on Frame.io?");
+        harness.get_by_label("All 3 items");
+        harness.get_by_label("Shows · Farbhaus");
+        // One folder is still being counted, so the size is a lower bound.
+        harness.get_by_label("3.90 GB so far");
+        press(&mut harness, CONFIRM_EMPTY);
+
+        match seen.borrow().as_slice() {
+            [Action::DeleteItems { folder_id, items, what, .. }] => {
+                assert_eq!(folder_id, "root-client-a");
+                let ids: Vec<&str> = items.iter().map(|t| t.id.as_str()).collect();
+                assert_eq!(ids, ["f-jobs", "f-old", "f-new"]);
+                assert_eq!(what, "everything in Client A");
+            }
+            other => panic!("expected one DeleteItems, saw {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_folder_a_watch_uses_says_so_and_the_dialog_warns() {
+        let mut items = client_items();
+        items[0].watches = vec!["Renders".into()];
+        let (mut harness, _) = screen(opened(items));
+        harness.get_by_label("Folder · watch folder Renders");
+
+        open_dialog(&mut harness, "Delete Jobs 2026 on Frame.io");
+        harness.get_by_label("Renders · will stop");
+    }
+
+    #[test]
+    fn a_row_being_deleted_offers_nothing_more() {
+        let mut items = client_items();
+        items[1].deleting = true;
+        let (harness, _) = screen(opened(items));
+        harness.get_by_label("Folder · deleting…");
+        harness.get_by_label("Deleting 1 item…");
+        assert!(harness.query_by_label("Delete Old jobs on Frame.io").is_none());
+        assert!(harness.query_by_label("Open Old jobs").is_none());
+    }
+
+    #[test]
+    fn a_folder_that_could_not_be_listed_offers_to_try_again() {
+        let mut state = opened(Vec::new());
+        state.space_folder = SpaceFolderView {
+            listed: false,
+            error: "Frame.io API error 403".into(),
+            ..SpaceFolderView::default()
+        };
+        let (mut harness, seen) = screen(state);
+        harness.get_by_label(LIST_FAILED_TITLE);
+        harness.get_by_label("Frame.io API error 403");
+        harness.get_by_label("Try again").click();
+        harness.run();
+        assert!(seen.borrow().contains(&Action::RefreshFolder));
+    }
+
+    #[test]
+    fn a_folder_still_being_listed_says_so() {
+        let mut state = opened(Vec::new());
+        state.space_folder = SpaceFolderView { counting: true, ..SpaceFolderView::default() };
+        let (harness, _) = screen(state);
+        harness.get_by_label(LISTING);
+        assert!(harness.query_by_label(EMPTY_PROJECT).is_none());
+    }
+
+    #[test]
+    fn an_empty_folder_says_nothing_is_here() {
+        let (harness, _) = screen(opened(Vec::new()));
+        harness.get_by_label(NOTHING_HERE_TITLE);
+        assert!(harness.query_by_label(EMPTY_PROJECT).is_none(), "nothing to empty");
+    }
+
+    #[test]
+    fn a_folder_still_counted_holds_no_slice() {
+        let rows = client_items();
+        assert_eq!(total_bytes(&rows), 3_907_000_000);
+        assert_eq!(slices(&rows).len(), 3, "the uncounted folder has no arc yet");
+    }
+
+    #[test]
+    fn every_delete_inside_a_project_is_in_one_column() {
+        // A file has no chevron, and its Delete must not slide into the slot.
+        let (harness, _) = screen(opened(client_items()));
+        let edge = |label: &str| harness.get_by_label(label).rect().max.x;
+        let folder = edge("Delete Jobs 2026 on Frame.io");
+        assert_eq!(edge("Delete Brief.pdf on Frame.io"), folder);
+        assert_eq!(edge("Delete New job on Frame.io"), folder);
+    }
+
+    #[test]
+    fn many_names_are_cut_to_three_and_a_count() {
+        let rows = client_items();
+        let refs: Vec<&SpaceItemRow> = rows.iter().collect();
+        assert_eq!(names_line(&refs), "Jobs 2026, Old jobs, New job and 1 more");
+        assert_eq!(names_line(&refs[..2]), "Jobs 2026, Old jobs");
+    }
 }
-
-
-
-
-

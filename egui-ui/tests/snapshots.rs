@@ -5,7 +5,9 @@
 //! screens and writes
 //! `/tmp/egui-shots/{transfers,space,watch,history,settings}.png` — plus
 //! `space-empty.png`, the Space screen with no projects, which is the state the
-//! fixture's other five never take.
+//! fixture's other five never take, and `space-project.png` and
+//! `space-empty-confirm.png`, the Space screen opened into a project and its
+//! "Empty project" confirmation.
 //! Those files are the artefact: they are what the webview front end's own
 //! screenshots were compared against while both existed (see the README's
 //! pixel table). The webview is retired, so this is now the app's own render of
@@ -140,6 +142,39 @@ fn the_empty_space_screen_renders_to_png() {
     image.save(&path).expect("write space-empty.png");
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     assert!(size > 2_000, "{} is only {size} bytes", path.display());
+}
+
+/// The Space screen opened into a project: its folders charted and listed, two
+/// of them ticked, one still being counted, one a watch folder's destination.
+#[test]
+fn the_opened_project_renders_to_png() {
+    let dir = ensure_shots_dir().expect("create /tmp/egui-shots");
+    let state = fiotransfer_egui::fixture::fixture_state_space_project();
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(WINDOW_WIDTH, WINDOW_HEIGHT))
+        .with_pixels_per_point(1.0)
+        .build_state(|ctx, app: &mut FioApp| app.draw(ctx), FioApp::new(state));
+    harness.run_steps(2);
+    harness.get_by_label(fiotransfer_egui::views::space::ALL_PROJECTS);
+    harness.get_by_label(fiotransfer_egui::views::space::EMPTY_PROJECT);
+    harness.get_by_label("Delete 2 selected on Frame.io");
+
+    let image = harness.render().expect("render");
+    assert_eq!((image.width(), image.height()), (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+    let path = dir.join("space-project.png");
+    image.save(&path).expect("write space-project.png");
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    assert!(size > 2_000, "{} is only {size} bytes", path.display());
+
+    // "Empty project" asks first, and names the watch folder it would stop.
+    harness.get_by_label(fiotransfer_egui::views::space::EMPTY_PROJECT).click();
+    harness.run_steps(3);
+    harness.get_by_label("Empty Nightfall on Frame.io?");
+    harness.get_by_label("Renders · will stop");
+    let image = harness.render().expect("render");
+    let path = dir.join("space-empty-confirm.png");
+    image.save(&path).expect("write space-empty-confirm.png");
 }
 
 /// The shell draws the sidebar, the screen it is told to, and the toasts; and a
