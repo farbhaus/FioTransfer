@@ -35,15 +35,18 @@ fn main() -> eframe::Result<()> {
         fiotransfer_sys::services::set_service_hook(fiotransfer_core::services::service_from_c);
         fiotransfer_sys::services::services_init();
     }
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
-            .with_min_inner_size([MIN_WIDTH, MIN_HEIGHT])
-            .with_title("FioTransfer")
-            // Open at login starts the app in the menu bar, without the window.
-            .with_visible(!launch.hidden),
-        ..Default::default()
-    };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
+        .with_min_inner_size([MIN_WIDTH, MIN_HEIGHT])
+        .with_title("FioTransfer")
+        // Open at login starts the app in the menu bar, without the window.
+        .with_visible(!launch.hidden);
+    // Without an icon eframe sets its own "e" logo, and on macOS it puts that on
+    // the Dock over the bundle's .icns.
+    if let Ok(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "FioTransfer",
         options,
@@ -52,6 +55,11 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app(launch)))
         }),
     )
+}
+
+/// The app's own icon, the artwork the bundle's .icns is made from.
+fn app_icon() -> Result<egui::IconData, String> {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../build/icons/icon_512.png")).map_err(|e| e.to_string())
 }
 
 /// What the window opens with, and whether the app runs behind it.
@@ -119,6 +127,13 @@ fn read_snapshot(path: &str) -> Result<Snapshot, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_carries_the_app_icon_not_eframes() {
+        let icon = app_icon().expect("the icon decodes");
+        assert_eq!((icon.width, icon.height), (512, 512));
+        assert_eq!(icon.rgba.len(), 512 * 512 * 4);
+    }
 
     /// The state one launch argument list produces.
     fn state_from_args(args: impl IntoIterator<Item = &'static str>) -> UiState {
