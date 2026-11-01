@@ -69,8 +69,7 @@ pub const PORTAL_MARKER: &str = "Portal";
 /// Portal still asks for it. The row keeps its Remove button — the sentence says
 /// what pressing it costs, rather than the screen hiding a button that would
 /// lie about being final.
-pub const PORTAL_SENTENCE: &str =
-    "Kept in step by Portal. Remove the marker in Portal to drop it.";
+pub const PORTAL_SENTENCE: &str = "Managed by Portal: remove it there";
 
 // The words the job a duplex is, and its lanes, are said in. This is the
 // screen's copy; the code behind it is `Lane`, `WatchRow::duplex_id` and
@@ -689,7 +688,7 @@ fn actions_cell(
 pub const EDITOR_TITLE_EDIT: &str = "Edit watch folder";
 pub const EDITOR_TITLE_NEW: &str = "Add a watch folder";
 /// What a watch Portal owns says, where the Save would be.
-pub const EDITOR_PORTAL: &str = "Kept in step by Portal — change it in Portal";
+pub const EDITOR_PORTAL: &str = "Managed by Portal";
 pub const EDITOR_SAVE: &str = "Save";
 pub const EDITOR_CANCEL: &str = "Cancel";
 /// The read-only dialog has nothing to cancel, so it says what it does instead.
@@ -2601,7 +2600,7 @@ mod tests {
             harness.query_by_label(PORTAL_SENTENCE).is_some(),
             "the job's tooltip is the sentence a Portal row already carries"
         );
-        assert!(PORTAL_SENTENCE.contains("Remove the marker in Portal"));
+        assert!(PORTAL_SENTENCE.contains("remove it there"));
 
         // And the Remove itself says what pressing it costs: Portal puts the job
         // back unless its marker is cleared in Portal. Its name is still Remove.

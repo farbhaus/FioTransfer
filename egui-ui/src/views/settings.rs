@@ -816,14 +816,7 @@ const PORTAL_PASSWORD_HINT: &str = "your Portal password";
 const TOTP_DIGITS: usize = 6;
 /// The code field's placeholder, which is the whole instruction it needs.
 const PORTAL_CODE_HINT: &str = "6 digits";
-/// What the code row says under its field: which code, and the promise that it
-/// is not kept.
-const PORTAL_CODE_NOTE: &str =
-    "Six digits from your authenticator app, to finish this sign-in. The code is not stored.";
-/// What the sign-in row says under its fields: the one promise the row makes.
-const PASSWORD_NOTE: &str =
-    "The password is not stored: only Portal's session cookie is, in your keychain.";
-/// The same line while the POST is out.
+/// What the sign-in rows say under their fields while the POST is out.
 const SIGNING_IN: &str = "Signing in…";
 /// What the address field says when it refuses a value.
 const PORTAL_URL_REASON: &str = "The Portal address has to start with http:// or https://";
@@ -949,16 +942,13 @@ pub fn portal_line(status: &PortalView) -> PortalLine {
     let url = status.url.trim();
     if url.is_empty() {
         return if status.signed_in {
-            line("No Portal address yet: add one above.".to_string(), true)
+            line("No Portal address".to_string(), true)
         } else {
-            line("Not set up: no Portal address and no token yet.".to_string(), false)
+            line("Not set up".to_string(), false)
         };
     }
     if !status.signed_in {
-        return line(
-            "Not signed in yet: save an access token above, or sign in below.".to_string(),
-            true,
-        );
+        return line("Not signed in".to_string(), true);
     }
     if !status.error.trim().is_empty() {
         let when = portal_when(status.last_at, status.now_ms);
@@ -968,16 +958,8 @@ pub fn portal_line(status: &PortalView) -> PortalLine {
         return line("Reconciling…".to_string(), false);
     }
     if status.last_at <= 0 {
-        // Nothing has run yet, so say what to press and whether the background
-        // poller is even on — a signed-in card that stays silent looks broken.
-        return line(
-            if status.enabled {
-                "Configured. Nothing has run yet: press Reconcile now.".to_string()
-            } else {
-                "Configured. Press Reconcile now, or switch it on to check every 30 s.".to_string()
-            },
-            false,
-        );
+        // A signed-in card that stays silent looks broken.
+        return line("Not run yet".to_string(), false);
     }
     let mut text = format!(
         "{} · {}, {} kept in step, {} removed",
@@ -1064,9 +1046,8 @@ fn portal_url_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<A
             }
         }
         ui.add_space(theme::space::XXS);
-        match state.portal.url_error.clone() {
-            Some(reason) => reason_line(ui, &reason),
-            None => help_line(ui, "Leave the address empty to switch Portal off."),
+        if let Some(reason) = state.portal.url_error.clone() {
+            reason_line(ui, &reason);
         }
     });
 }
@@ -1123,12 +1104,6 @@ fn portal_token_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option
                 }
             });
         });
-        ui.add_space(theme::space::XXS);
-        if stored {
-            help_line(ui, "A token is stored in your keychain, never in settings.json.");
-        } else {
-            help_line(ui, "No token is stored yet. Paste one and press Save.");
-        }
     });
 }
 
@@ -1223,7 +1198,7 @@ fn portal_signin_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Optio
             // something to say and the note does not.
             Some(reason) => reason_line(ui, &reason),
             None if signing_in => help_line(ui, SIGNING_IN),
-            None => help_line(ui, PASSWORD_NOTE),
+            None => {}
         }
     });
 }
@@ -1280,7 +1255,7 @@ fn portal_totp_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<
             // again do not read the same.
             Some(reason) => reason_line(ui, &reason),
             None if signing_in => help_line(ui, SIGNING_IN),
-            None => help_line(ui, PORTAL_CODE_NOTE),
+            None => {}
         }
     });
 }
@@ -1317,12 +1292,13 @@ fn portal_root_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<
         match state.portal.root_error.clone() {
             Some(reason) => reason_line(ui, &reason),
             None => {
-                // The resolved path, so nobody has to guess where the folders go.
-                let resolved = resolved_portal_root(
-                    state.portal.root_draft.as_deref().unwrap_or(&state.settings.portal_root),
-                    &home,
-                );
-                help_line(ui, &format!("Folders are created under {resolved}"));
+                // The resolved path, when the field does not already say it
+                // (`~/…`, or empty for the default).
+                let typed = state.portal.root_draft.as_deref().unwrap_or(&state.settings.portal_root);
+                let resolved = resolved_portal_root(typed, &home);
+                if resolved != typed.trim() {
+                    help_line(ui, &format!("Folders are created under {resolved}"));
+                }
             }
         }
     });
@@ -1344,12 +1320,10 @@ fn portal_enabled_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Opti
                 }
             });
         });
-        ui.add_space(theme::space::XXS);
         if enabled {
             let every = if every >= 5 { every } else { 30 };
-            help_line(ui, &format!("Checked every {every} s in the background."));
-        } else {
-            help_line(ui, "Nothing is contacted while this is off.");
+            ui.add_space(theme::space::XXS);
+            help_line(ui, &format!("Checked every {every} s"));
         }
     });
     state.settings.portal_enabled = enabled;
@@ -1376,12 +1350,13 @@ fn portal_status_line(ui: &mut egui::Ui, state: &mut UiState) {
 fn portal_reconcile_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<Action>) {
     let status = &state.portal.status;
     let ready = status.configured();
+    // Only a button that cannot be pressed says why.
     let reason = if status.url.trim().is_empty() {
         "Add the Portal address first."
     } else if !status.signed_in {
         "Add the access token first."
     } else {
-        "Keeps one watch folder per live link, now."
+        ""
     };
     line(ui, |ui| {
         ui.horizontal(|ui| {
@@ -1389,8 +1364,10 @@ fn portal_reconcile_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Op
                 ui.set_width((ui.available_width() - 150.0).max(80.0));
                 ui.spacing_mut().interact_size.y = LABEL_LINE;
                 field_label(ui, "Reconcile");
-                ui.add_space(theme::space::XXS);
-                help_line(ui, reason);
+                if !reason.is_empty() {
+                    ui.add_space(theme::space::XXS);
+                    help_line(ui, reason);
+                }
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if secondary_button_enabled(ui, "Reconcile now", ready) {
@@ -1618,7 +1595,8 @@ mod tests {
         for heading in ["Settings", "Frame.io account", "App", "Performance", "Storage"] {
             harness.get_by_label(heading);
         }
-        harness.get_by_label("Not set up");
+        // The account's status, and Portal's under its own heading.
+        assert_eq!(harness.get_all_by_label("Not set up").count(), 2);
         harness.get_by_label("Sign in with Adobe");
         harness.get_by_label("Adobe Client ID");
         // Two "Save" buttons now (the Client ID's and the Portal token's): the
@@ -2156,10 +2134,10 @@ mod tests {
         harness.get_by_label("Status");
         harness.get_by_label("Reconcile");
         harness.get_by_label("Reconcile now");
-        // The address and the folder are what the settings hold, and the folder
-        // says where the folders really go.
+        // The address and the folder are what the settings hold. The folder is
+        // already absolute, so no line repeats it.
         assert!(every_word(&harness).contains(&"https://portal.example.com".to_string()));
-        harness.get_by_label("Folders are created under /Users/chaos/Live_Work");
+        assert!(harness.query_by_label("Folders are created under /Users/chaos/Live_Work").is_none());
     }
 
     #[test]
@@ -2297,14 +2275,14 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_contacted_while_portal_is_off() {
+    fn the_poller_says_its_interval_only_while_it_is_on() {
         let harness = screen_harness(state(configured(), true));
-        harness.get_by_label("Nothing is contacted while this is off.");
+        assert!(harness.query_by_label("Checked every 30 s").is_none());
 
         let mut ui_state = portal_state();
         ui_state.settings.portal_enabled = true;
         let harness = screen_harness(ui_state);
-        harness.get_by_label("Checked every 30 s in the background.");
+        harness.get_by_label("Checked every 30 s");
     }
 
     #[test]
@@ -2377,27 +2355,24 @@ mod tests {
         let mut status = PortalView::default();
         // Nothing at all: not set up, and it is not an error.
         let words = portal_line(&status);
-        assert_eq!(words.text, "Not set up: no Portal address and no token yet.");
+        assert_eq!(words.text, "Not set up");
         assert!(!words.failed);
 
         // A token but no address, and the other way round: each names what is
         // missing, and both are reasons nothing can be reconciled.
         status.signed_in = true;
-        assert_eq!(portal_line(&status).text, "No Portal address yet: add one above.");
+        assert_eq!(portal_line(&status).text, "No Portal address");
         assert!(portal_line(&status).failed);
 
         status.signed_in = false;
         status.url = "https://portal.example.com".to_string();
-        assert_eq!(
-            portal_line(&status).text,
-            "Not signed in yet: save an access token above, or sign in below."
-        );
+        assert_eq!(portal_line(&status).text, "Not signed in");
         assert!(portal_line(&status).failed);
 
         // Configured, and never run: no numbers to claim yet.
         status.signed_in = true;
         let words = portal_line(&status);
-        assert_eq!(words.text, "Configured. Press Reconcile now, or switch it on to check every 30 s.");
+        assert_eq!(words.text, "Not run yet");
         assert!(!words.failed);
 
         // A reconcile in flight says so.
@@ -2502,13 +2477,6 @@ mod tests {
         // is set, "not set" when not. Neither is ever the token.
         assert_eq!(TOKEN_STORED, "stored in your keychain");
         assert_eq!(TOKEN_MISSING, "not set");
-        // `hint_text` is painted, not an accesskit node, so the row says it in
-        // its help line too, which is what a screen reader and these tests read.
-        let harness = screen_harness(portal_state());
-        harness.get_by_label("A token is stored in your keychain, never in settings.json.");
-
-        let harness = screen_harness(state(configured(), true));
-        harness.get_by_label("No token is stored yet. Paste one and press Save.");
     }
 
     /// The screen with a Portal session stored: the same set-up as
@@ -2540,8 +2508,6 @@ mod tests {
             2,
             "the token field and the password field"
         );
-        // The promise the row makes, in the same `.help` line as the rows above.
-        harness.get_by_label(PASSWORD_NOTE);
         assert!(
             harness.query_by_label("Signed in as ops@nightfall.tv").is_none(),
             "nobody is signed in yet"
@@ -2611,10 +2577,6 @@ mod tests {
         let button = harness.get_by_label("Sign in");
         assert!(button.accesskit_node().is_disabled(), "one sign-in at a time");
         harness.get_by_label(SIGNING_IN);
-        assert!(
-            harness.query_by_label(PASSWORD_NOTE).is_none(),
-            "while it is out, the row says what it is doing"
-        );
     }
 
     #[test]
@@ -2628,7 +2590,6 @@ mod tests {
         // The app's sentence, where the note was, and the address it is about
         // still in the field.
         harness.get_by_label("Portal refused the sign-in (401): Invalid email or password");
-        assert!(harness.query_by_label(PASSWORD_NOTE).is_none(), "the reason takes the note's place");
         assert!(every_word(&harness).contains(&"ops@nightfall.tv".to_string()));
         assert_eq!(
             harness.get_all_by_role(egui::accesskit::Role::PasswordInput).count(),
@@ -2653,11 +2614,9 @@ mod tests {
     fn a_sign_in_that_wants_a_code_asks_for_six_digits() {
         let harness = screen_harness(needs_code_state());
 
-        // The row, named, and the note under it: which code, and that it is not
-        // kept. The password row is still there — Portal's pending step expires,
-        // and a fresh password sign-in is how a user gets past that.
+        // The row, named. The password row is still there — Portal's pending
+        // step expires, and a fresh password sign-in is how a user gets past that.
         harness.get_by_label("One-time code");
-        harness.get_by_label(PORTAL_CODE_NOTE);
         // Nothing typed yet: the row's "Sign in" waits. (The password row has one
         // too, and both are disabled with nothing typed.)
         let buttons = harness.get_all_by_label("Sign in");
@@ -2709,7 +2668,6 @@ mod tests {
         let harness = screen_harness(ui_state);
 
         harness.get_by_label("Portal refused the one-time code (401): Invalid code");
-        assert!(harness.query_by_label(PORTAL_CODE_NOTE).is_none(), "the reason takes the note's place");
         harness.get_by_label("One-time code");
     }
 
@@ -2817,19 +2775,16 @@ mod tests {
         harness.get_by_label(short_path(&long, "/Users/chaos").as_str());
     }
     #[test]
-    fn a_configured_card_says_what_to_press_and_whether_the_poller_is_on() {
+    fn a_configured_card_that_never_ran_says_so() {
         let mut status = PortalView::default();
         status.url = "https://portal.example.com".to_string();
         status.signed_in = true;
         status.root = "/tmp/Live_Work".to_string();
-        status.enabled = false;
-        assert_eq!(
-            portal_line(&status).text,
-            "Configured. Press Reconcile now, or switch it on to check every 30 s."
-        );
-        status.enabled = true;
-        assert_eq!(portal_line(&status).text, "Configured. Nothing has run yet: press Reconcile now.");
-        assert!(!portal_line(&status).failed);
+        for enabled in [false, true] {
+            status.enabled = enabled;
+            assert_eq!(portal_line(&status).text, "Not run yet");
+            assert!(!portal_line(&status).failed);
+        }
     }
 
 }
