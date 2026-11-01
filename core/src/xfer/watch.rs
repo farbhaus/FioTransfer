@@ -657,6 +657,7 @@ fn existing_files(local: &str) -> Vec<WatchFile> {
     let _ = walk_watch(local, &mut files, &mut None);
     files
         .into_iter()
+        .filter(|(_, size, _)| *size > 0)
         .map(|(rel, size, mtime)| wf(&rel, size, mtime, WATCH_IGNORED))
         .collect()
 }
@@ -806,8 +807,9 @@ fn temp_name(name: &str) -> bool {
         || n.ends_with(".temp")
 }
 
-/// walk_watch calls fn for every file a watch would consider, and dir_fn (if
-/// set) with every folder it descends into and that folder's mtime.
+/// walk_watch calls fn for every file a watch would consider (empty ones too:
+/// they may be about to fill), and dir_fn (if set) with every folder it
+/// descends into and that folder's mtime.
 fn walk_watch(
     root: &str,
     files: &mut Vec<(String, i64, i64)>,
@@ -856,9 +858,6 @@ fn walk_dir(
             continue;
         }
         if !md.is_file() {
-            continue;
-        }
-        if md.len() == 0 {
             continue;
         }
         let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
@@ -981,7 +980,7 @@ fn scan_upload_side(
         for rel in prev.keys() {
             let local = join_path(root, rel);
             if let Ok(md) = std::fs::metadata(&local) {
-                if md.is_file() && md.len() > 0 {
+                if md.is_file() {
                     files.push((rel.clone(), md.len() as i64, mtime_nanos(&md)));
                 }
             }
@@ -1012,6 +1011,12 @@ fn scan_upload_side(
             }
         }
         out.seen.insert(rel.clone(), o);
+        if size == 0 {
+            // Frame.io takes no empty files. Seen, so the next scan checks it
+            // again: one caught just after it was created fills without its
+            // folder's mtime moving.
+            continue;
+        }
         let local = join_path(root, &rel);
         let steady = now.duration_since(o.since);
         if steady < settle {
@@ -2199,6 +2204,40 @@ mod tests {
         assert_eq!(files[1].rel, "a.mov (2).mov");
     }
 
+    // A walk can catch a file just after it's created, still empty. Filling it
+    // doesn't change its folder, so the quick re-check (no walk) must keep
+    // checking it instead of waiting for the next full walk.
+    #[test]
+    fn a_file_caught_empty_is_rechecked_without_a_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_string_lossy().into_owned();
+        let p = tmp.path().join("a.wav");
+        std::fs::write(&p, b"").unwrap();
+        let settle = Duration::from_millis(20);
+        let known = HashMap::new();
+        let out = scan_upload_side(&root, &HashMap::new(), &known, true, settle, false, false, None);
+        assert!(out.seen.contains_key("a.wav"), "an empty file is seen");
+        assert_eq!((out.pending, out.settled.len()), (0, 0), "but neither settling nor uploaded");
+
+        std::fs::write(&p, b"RIFF0000WAVEdata").unwrap();
+        let inc = scan_upload_side(&root, &out.seen, &known, false, settle, false, false, None);
+        assert_eq!(inc.pending, 1, "the re-check sees it fill");
+        std::thread::sleep(settle * 2);
+        let inc = scan_upload_side(&root, &inc.seen, &known, false, settle, false, false, None);
+        assert_eq!(inc.settled.iter().map(|i| i.rel.as_str()).collect::<Vec<_>>(), ["a.wav"]);
+    }
+
+    // An empty file at creation isn't left alone with the existing ones: once it
+    // fills, it's new.
+    #[test]
+    fn existing_files_leave_out_empty_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("empty.mov"), b"").unwrap();
+        std::fs::write(tmp.path().join("full.mov"), b"x").unwrap();
+        let got: Vec<String> = existing_files(&tmp.path().to_string_lossy()).into_iter().map(|f| f.rel_path).collect();
+        assert_eq!(got, ["full.mov"]);
+    }
+
     // Go: TestLocalRootOK — a share that isn't mounted is refused.
     #[test]
     fn local_root_ok_refuses_missing_folders() {
@@ -2488,7 +2527,7 @@ mod props {
                 sub.collect(&join(prefix, name), out);
             }
             for (name, size) in &self.files {
-                if skip_name(name) || temp_name(name) || *size == 0 {
+                if skip_name(name) || temp_name(name) {
                     continue;
                 }
                 out.insert((join(prefix, name), *size));
@@ -2848,6 +2887,9 @@ mod props {
                 return (false, None); // gave up on this version of the file
             }
         }
+        if size == 0 {
+            return (true, None); // seen, so it's checked again, but never uploaded
+        }
         let since = match prev {
             Some(p) if p.size == size && p.mtime == mtime => p.since,
             _ => now,
@@ -2886,7 +2928,7 @@ mod props {
         #[test]
         fn scan_upload_side_follows_the_documented_rules(
             n in 1usize..4,
-            sizes in pvec(1u8..4, 3),
+            sizes in pvec(0u8..4, 3),
             rows in pvec((0usize..4, 0usize..7, 0i64..5, 0usize..3), 0..4),
             prevs in pvec((0usize..4, 0usize..4), 0..4),
             mirror in any::<bool>(),
@@ -2946,6 +2988,7 @@ mod props {
             let mut want_settled: BTreeSet<String> = BTreeSet::new();
             let mut want_frameio: BTreeSet<String> = BTreeSet::new();
             let mut want_pending = 0usize;
+            let mut want_empty = 0usize;
             for (rel, size, mtime) in &disk {
                 let (seen, kind) = expected(rel, *size, *mtime, known.get(rel), prev.get(rel), settle, net_vol, mirror, &same);
                 if !seen {
@@ -2957,7 +3000,7 @@ mod props {
                     Some(Kind::Pending) => want_pending += 1,
                     Some(Kind::OnFrameio) => { want_frameio.insert(rel.clone()); }
                     Some(Kind::Settled) => { want_settled.insert(rel.clone()); }
-                    None => {}
+                    None => want_empty += 1,
                 }
             }
             let got_seen: BTreeSet<String> = out.seen.keys().cloned().collect();
@@ -2973,7 +3016,7 @@ mod props {
             prop_assert_eq!(out.pending, want_pending);
             prop_assert_eq!(
                 out.seen.len(),
-                out.settled.len() + out.on_frameio.len() + out.pending,
+                out.settled.len() + out.on_frameio.len() + out.pending + want_empty,
                 "every seen file lands in exactly one bucket"
             );
             for (rel, size, mtime) in &disk {
