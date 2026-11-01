@@ -193,8 +193,9 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
     }
 
     // Everything from here on owns a file on Frame.io: if the upload doesn't
-    // get all the bytes there, the copy is deleted again — unless the user
-    // stopped it, in which case it is kept so the next attempt can carry on.
+    // get all the bytes there (failure, cancel, quit, a change), the copy is
+    // deleted again. Only a crash leaves the ledger, so the next attempt can
+    // carry on while it's fresh; clean_up deletes the copy after that.
     let outcome = send_parts(&j, &f, &m, fh, &parts, size, &st, &content_type, &done, &ledger).await;
     let stopped = j.cx.is_cancelled();
     let expired = resuming > 0 && matches!(&outcome, Err(e) if e.contains("403")) && !stopped;
@@ -214,18 +215,11 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
             return upload_file_inner(j.clone(), f.clone(), false).await;
         }
         Err(e) => {
-            if stopped {
-                m.hist.log(&format!(
-                    "{} paused   [{}] {} — kept on Frame.io so it can be resumed ({})",
-                    kind_tag(&j.kind),
-                    j.id,
-                    f.rel_path,
-                    e
-                ));
-            } else {
-                discard(&j, &f, &file_id).await;
-                ledger.remove();
-            }
+            // The ledger goes first: a quit can end the process before the
+            // delete returns, and clean_up leaves alone a copy a fresh ledger
+            // still points at.
+            ledger.remove();
+            discard(&j, &f, &file_id).await;
             Err(e)
         }
     };
