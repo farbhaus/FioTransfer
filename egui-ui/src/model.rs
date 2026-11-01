@@ -361,6 +361,9 @@ pub struct DestPicker {
     /// The keyboard's row, and whether the keyboard moved it.
     pub sel: usize,
     pub kbd: bool,
+    /// The list brings `sel` into view on its next frame. Once: after that the
+    /// wheel moves the list.
+    pub scroll_sel: bool,
     /// The New folder name field, while it's open.
     pub new_folder: Option<String>,
     /// Bumped for each level (`seq`) and each search (`qseq`) asked for: only
@@ -386,6 +389,7 @@ impl DestPicker {
             searched: false,
             sel: 0,
             kbd: false,
+            scroll_sel: false,
             new_folder: None,
             seq: 0,
             qseq: 0,

@@ -1279,6 +1279,7 @@ impl Shell {
                 if let Some(i) = next.and_then(|id| items.iter().position(|n| n.id == id)) {
                     p.sel = i;
                     p.kbd = true;
+                    p.scroll_sel = true;
                 }
                 p.items = Some(items);
             }

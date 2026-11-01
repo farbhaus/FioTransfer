@@ -72,6 +72,9 @@ pub fn show(ctx: &egui::Context, state: &mut UiState) {
             let (here, there) = picker.rows();
             keyboard(ui, picker, here.len() + there.len(), typing, &mut act, &here, &there);
             list(ui, picker, &here, &there, !account.is_empty(), list_h, &mut act);
+            if !ui.is_sizing_pass() {
+                picker.scroll_sel = false;
+            }
             foot(ui, picker, &mut act);
         });
 
@@ -217,6 +220,7 @@ fn search_field(ui: &mut Ui, picker: &mut DestPicker, now: f64) -> bool {
                 picker.hits_error.clear();
                 picker.searched = false;
                 picker.sel = 0;
+                picker.scroll_sel = true;
                 picker.typed_at = now;
                 picker.qseq += 1;
             }
@@ -278,6 +282,7 @@ fn keyboard(ui: &Ui, picker: &mut DestPicker, rows: usize, typing: bool, act: &m
             picker.sel = if down { (picker.sel + 1).min(rows - 1) } else { picker.sel.saturating_sub(1) };
         }
         picker.kbd = true;
+        picker.scroll_sel = true;
         picker.focus_query = true;
     }
     if enter && typing {
@@ -318,7 +323,7 @@ fn list(
                 let q = picker.query.trim();
                 let mark = !q.is_empty() || picker.kbd;
                 for (i, node) in here.iter().enumerate() {
-                    if row(ui, node, q, mark && picker.sel == i) {
+                    if row(ui, node, q, mark && picker.sel == i, picker.scroll_sel) {
                         *act = Some(Do::Open(node.clone()));
                     }
                 }
@@ -334,7 +339,7 @@ fn list(
                         note(ui, None);
                     } else {
                         for (k, node) in there.iter().enumerate() {
-                            if row(ui, node, q, mark && picker.sel == here.len() + k) {
+                            if row(ui, node, q, mark && picker.sel == here.len() + k, picker.scroll_sel) {
                                 *act = Some(Do::Open(node.clone()));
                             }
                         }
@@ -348,8 +353,9 @@ fn list(
 }
 
 /// `.dest-item`: the kind's glyph, the name (the search's match in bold), the
-/// hit's project, a chevron. Answers whether it was clicked.
-fn row(ui: &mut Ui, node: &DestNode, query: &str, selected: bool) -> bool {
+/// hit's project, a chevron; `scroll` brings it into view when selected.
+/// Answers whether it was clicked.
+fn row(ui: &mut Ui, node: &DestNode, query: &str, selected: bool, scroll: bool) -> bool {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click());
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &node.name));
@@ -357,7 +363,7 @@ fn row(ui: &mut Ui, node: &DestNode, query: &str, selected: bool) -> bool {
     if selected || hovered {
         ui.painter().rect_filled(rect, theme::R_S, if selected { theme::ACTIVE } else { theme::HOVER });
     }
-    if selected {
+    if selected && scroll {
         ui.scroll_to_rect(rect, None);
     }
     let painter = ui.painter();
@@ -740,6 +746,7 @@ mod tests {
         // What the shell does when the level lands: the way down is highlighted.
         p.sel = 1;
         p.kbd = true;
+        p.scroll_sel = true;
         let mut h = harness(state);
         h.run_steps(4);
         h.snapshot("dest_picker_trail");
@@ -750,6 +757,32 @@ mod tests {
         assert_eq!(p.top().map(|t| t.name.as_str()), Some("Graded"));
         assert!(p.forward().is_empty());
         assert_eq!(h.state().requests, vec![Request::DestLoad { skip: false }]);
+    }
+
+    #[test]
+    fn the_list_scrolls_away_from_the_highlighted_row() {
+        let mut state = at_project(DestMode::Upload { pending: Vec::new() });
+        let p = state.dest_picker.as_mut().unwrap();
+        p.stack.truncate(2);
+        p.trail.clear();
+        p.items = Some((0..40).map(|i| node("project", &format!("Project {i:02}"))).collect());
+        // The destination's project, far down the list, as the shell highlights it.
+        p.sel = 30;
+        p.kbd = true;
+        p.scroll_sel = true;
+        let mut h = harness(state);
+        h.run_steps(10);
+        let shown = h.get_by_label("Project 30").rect();
+        assert!(h.get_by_label("Project 00").rect().top() < shown.top() - ROW_H * 20.0, "scrolled down to it");
+
+        // (A wheel event doesn't reach the list in the harness; accesskit's scroll does.)
+        for _ in 0..8 {
+            h.get_by_label("Project 30").scroll_up();
+            h.step();
+        }
+        h.run_steps(10);
+        let after = h.get_by_label("Project 30").rect();
+        assert!(after.top() > shown.top() + 700.0, "the list stays where it was scrolled to: {shown:?} → {after:?}");
     }
 
     #[test]
