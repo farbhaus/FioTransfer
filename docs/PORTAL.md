@@ -45,7 +45,7 @@ Its presence is the tick; every field in it is optional:
 
 ```json
 {
-  "id": "…", "name": "Acme Spot 30s", "status": "active",
+  "id": "…", "name": "Acme Spot 30s", "state": "ok",
   "folder": {
     "account_id": "…", "folder_id": "…",
     "sync": {
@@ -65,6 +65,7 @@ Its presence is the tick; every field in it is optional:
 | `sync.download.local` | IN's name | the user's IN name |
 | `sync.upload.folder_id` | The Frame.io folder OUT goes to. Without it there is no OUT. | none |
 | `sync.upload.local` | OUT's name | the user's OUT name |
+| `state` | `ok` while the link works; `expired` or `revoked` stop its folders | live |
 
 Folder names are one path segment: no `/`, `\`, `%`, control characters, `.` or `..`. A link's own name is
 cleaned up to fit (`/` becomes `-`); a name Portal sets is refused with a reason instead. Two links that

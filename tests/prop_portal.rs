@@ -913,6 +913,80 @@ fn a_ticked_link_is_named_after_itself_and_the_users_names_apply() {
     assert!(w.app.set_portal_folders("a/b", "OUT").is_err(), "one segment each");
 }
 
+/// Portal's `state`: a link that expires or is revoked stops syncing at the
+/// next reconcile, and its folder stays on disk; one already expired gets none.
+#[test]
+fn an_expired_or_revoked_link_stops_and_leaves_its_folder() {
+    let w = World::new();
+    let ticked = |id: &str, state: &str| {
+        let mut row = sync_row(id, "", json!({}));
+        row["name"] = json!(format!("Project {id}"));
+        row["state"] = json!(state);
+        row
+    };
+    w.stub.links(vec![ticked("L1", "ok"), ticked("L2", "ok"), ticked("L3", "expired")]);
+    let rep = w.reconcile();
+    assert!(rep.error.is_empty(), "{}", rep.error);
+    let ws = w.portal_watches();
+    assert_eq!(ws.len(), 2, "the expired link gets no folder: {:?}", ws);
+    assert!(!w.root.join("Project L3").exists(), "nothing made for it");
+
+    w.stub.links(vec![ticked("L1", "revoked"), ticked("L2", "ok"), ticked("L3", "expired")]);
+    let rep = w.reconcile();
+    assert!(rep.error.is_empty(), "{}", rep.error);
+    let ws = w.portal_watches();
+    assert_eq!(ws.len(), 1, "{:?}", ws);
+    assert_eq!(ws[0].local_path, w.root.join("Project L2/IN").to_string_lossy().into_owned());
+    assert!(w.root.join("Project L1/IN").is_dir(), "the revoked link's folder stays");
+}
+
+/// What Portal does to an older link, as its dev described it: the stored
+/// `turbosort`, `drive` and `exports` stay as sent; a new return folder sets
+/// `folder_id` on the existing `exports` lane; removing it drops `exports`. No
+/// folder on disk moves at any step.
+#[test]
+fn portals_edits_to_an_older_link_move_no_folder() {
+    let w = World::new();
+    let row = |exports: Option<&str>| {
+        let mut sync = json!({"mode": "add_only", "drive": {"local": "1_DRIVE"}});
+        if let Some(f) = exports {
+            sync["exports"] = json!({"local": "0_EXPORTS", "folder_id": f});
+        }
+        sync_row("L1", MARKER, sync)
+    };
+    let base = w.root.join(MARKER);
+    let paths = |w: &World| {
+        let mut p: Vec<(String, String, String)> =
+            w.portal_watches().into_iter().map(|x| (x.local_path, x.folder_id, x.id)).collect();
+        p.sort();
+        p
+    };
+
+    w.stub.links(vec![row(Some("FX1"))]);
+    assert!(w.reconcile().error.is_empty());
+    let first = paths(&w);
+    assert_eq!(
+        first.iter().map(|p| p.0.clone()).collect::<Vec<_>>(),
+        vec![base.join("0_EXPORTS").to_string_lossy().into_owned(), base.join("1_DRIVE").to_string_lossy().into_owned()]
+    );
+
+    // A new return folder: the same OUT folder, the same watch, a new destination.
+    w.stub.links(vec![row(Some("FX2"))]);
+    assert!(w.reconcile().error.is_empty());
+    let second = paths(&w);
+    assert_eq!(second[0].0, first[0].0, "OUT did not move");
+    assert_eq!(second[0].2, first[0].2, "the same watch");
+    assert_eq!(second[0].1, "FX2");
+    assert_eq!(second[1], first[1], "IN untouched");
+
+    // The return folder removed: OUT is unwatched and stays on disk; IN untouched.
+    w.stub.links(vec![row(None)]);
+    assert!(w.reconcile().error.is_empty());
+    let third = paths(&w);
+    assert_eq!(third, vec![first[1].clone()]);
+    assert!(base.join("0_EXPORTS").is_dir());
+}
+
 #[test]
 fn both_locals_the_same_refuses_the_second_mapping() {
     let w = World::new();

@@ -689,6 +689,10 @@ pub struct UploadLink {
     /// Portal's word for a link that is not live.
     #[serde(default, deserialize_with = "nullable")]
     pub status: String,
+    /// Portal's state for the link: "ok" while it works, "expired" or "revoked"
+    /// after. Anything but "ok" stops its folders.
+    #[serde(default, deserialize_with = "nullable")]
+    pub state: String,
     #[serde(default, deserialize_with = "nullable")]
     pub disabled: bool,
     /// The same flag the other way round; absent means "not said".
@@ -741,6 +745,10 @@ impl UploadLink {
     /// Whether Portal says this link is not live: its watch goes.
     pub fn is_disabled(&self) -> bool {
         if self.disabled || self.enabled == Some(false) {
+            return true;
+        }
+        let state = self.state.trim().to_ascii_lowercase();
+        if !state.is_empty() && state != "ok" {
             return true;
         }
         let st = self.status.trim().to_ascii_lowercase();
@@ -1342,12 +1350,21 @@ mod tests {
     fn a_link_says_when_it_is_off() {
         let on: UploadLink = serde_json::from_str(r#"{"id":"L3"}"#).unwrap();
         assert!(!on.is_disabled());
-        for raw in [r#"{"disabled":true}"#, r#"{"enabled":false}"#, r#"{"status":"Archived"}"#] {
+        for raw in [
+            r#"{"disabled":true}"#,
+            r#"{"enabled":false}"#,
+            r#"{"status":"Archived"}"#,
+            r#"{"state":"expired","expires_at":"2026-10-01T00:00:00Z"}"#,
+            r#"{"state":"revoked","revoked_at":"2026-10-30T12:00:00Z"}"#,
+            r#"{"state":"Revoked"}"#,
+        ] {
             let l: UploadLink = serde_json::from_str(raw).unwrap();
             assert!(l.is_disabled(), "{} says the link is off", raw);
         }
-        let l: UploadLink = serde_json::from_str(r#"{"enabled":true,"status":"live"}"#).unwrap();
-        assert!(!l.is_disabled());
+        for raw in [r#"{"enabled":true,"status":"live"}"#, r#"{"state":"ok"}"#, r#"{"state":null}"#] {
+            let l: UploadLink = serde_json::from_str(raw).unwrap();
+            assert!(!l.is_disabled(), "{} is live", raw);
+        }
     }
 
     #[test]
