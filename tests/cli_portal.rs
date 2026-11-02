@@ -220,8 +220,7 @@ fn answer(mut c: TcpStream, st: Arc<StubState>) {
         }
         ("GET", "/api/auth/me") if authorised => (200, None, json!({ "id": "u1", "email": EMAIL }).to_string()),
         ("GET", "/api/upload-links") if authorised => (200, None, seeded_links()),
-        ("GET", "/api/sync-rules") if authorised => (200, None, json!({ "data": [] }).to_string()),
-        ("GET" | "POST", "/api/auth/me" | "/api/upload-links" | "/api/sync-rules") => {
+        ("GET" | "POST", "/api/auth/me" | "/api/upload-links") => {
             (401, None, json!({ "detail": "Authentication required" }).to_string())
         }
         _ => (404, None, json!({ "detail": "no route" }).to_string()),

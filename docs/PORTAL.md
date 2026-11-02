@@ -7,10 +7,12 @@ and Frame.io.
 
 ```
 ~/Portal/
-  Acme Spot 30s/      ← one folder per synced link, named after the link
-    IN/               ← what the client uploads (Frame.io → disk)
-    OUT/              ← what you send back (disk → Frame.io), only if the link has a return folder
+  Acme Spot 30s/      ← named after the link (an unnamed link: its job folder on Frame.io)
+    RUSHES/           ← what the client uploads (Frame.io → disk)
+    RENDER/           ← what you send back (disk → Frame.io), only if the link has a return folder
 ```
+
+Portal names the two folders after their Frame.io folders. Where it doesn't, they're IN and OUT.
 
 ## Rules
 
@@ -21,6 +23,8 @@ and Frame.io.
 - **Nothing is ever deleted**, on either side. Each folder moves files one way only.
 - **When a link closes or is unticked**, its folders stop syncing and stay on disk with everything in them.
 - **Renaming** a link, or the IN/OUT names, starts a new folder; the old one stays.
+- **Links of one job share its folder**, each with its own IN. Links that share a return folder share
+  one OUT.
 - **Edit links in Portal.** Portal's folders are read-only in Watch Folders. Pausing one is fine.
 
 ## Setting it up
@@ -68,11 +72,12 @@ Its presence is the tick; every field in it is optional:
 | `state` | `ok` while the link works; `expired` or `revoked` stop its folders | live |
 
 Folder names are one path segment: no `/`, `\`, `%`, control characters, `.` or `..`. A link's own name is
-cleaned up to fit (`/` becomes `-`); a name Portal sets is refused with a reason instead. Two links that
-end up with the same folder name: the lower id gets it, the other is skipped with a reason.
+cleaned up to fit (`/` becomes `-`); a name Portal sets is refused with a reason instead. Names that differ
+only in case are one folder. Two links naming one IN or OUT folder for different Frame.io folders: the lower
+id gets it, the other is skipped with a reason.
 
 Older Portals that call the sides `drive` and `exports` are still read. A link with only a `turbosort`
-value and no `sync` is one two-way folder, `~/Portal/<turbosort>`, as before.
+value and no `sync` is one two-way folder, `~/Portal/<turbosort>`, as before; it needs that folder to itself.
 
 ## From a terminal
 

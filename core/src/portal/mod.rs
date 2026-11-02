@@ -7,10 +7,9 @@
 //! local side is ours (`Settings::portal_root`), and Portal's own destination
 //! paths are never adopted.
 //!
-//! Only two endpoints are used, both documented here and neither invented:
-//! `GET /api/upload-links` (the links, each with its `target_folder_id`,
-//! `target_folder_name` and `folder`) and `GET /api/sync-rules` (read-only
-//! reference: what Portal's own worker would do).
+//! Besides signing in, one endpoint is read: `GET /api/upload-links` (the
+//! links, each with its `target_folder_id`, `target_folder_name` and `folder`).
+//! Portal 2.2 dropped its own sync and `/api/sync-rules` with it.
 //!
 //! A synced link's `folder` carries a `sync` object — see [`Sync`] — naming its
 //! one or two one-way folders. It rides on the same row, so no endpoint is
@@ -756,30 +755,6 @@ impl UploadLink {
     }
 }
 
-/// One row of `GET /api/sync-rules`.
-///
-/// Read-only reference: it says what Portal's own worker would do with a
-/// marker, including a `destination_path` and `path_template` under *its* disk.
-/// None of it is adopted — the local root is a FioTransfer setting — so these
-/// rows are for showing, not for acting on.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SyncRule {
-    #[serde(default, deserialize_with = "nullable")]
-    pub id: String,
-    #[serde(default, deserialize_with = "nullable")]
-    pub name: String,
-    #[serde(default, deserialize_with = "nullable")]
-    pub turbosort: String,
-    #[serde(default, deserialize_with = "nullable")]
-    pub destination_path: String,
-    #[serde(default, deserialize_with = "nullable")]
-    pub path_template: String,
-    #[serde(default, deserialize_with = "nullable")]
-    pub target_folder_id: String,
-    #[serde(default, deserialize_with = "nullable")]
-    pub target_folder_name: String,
-}
-
 // ---------- the client ----------
 
 fn http() -> &'static reqwest::Client {
@@ -1193,17 +1168,6 @@ impl PortalClient {
         Ok(out)
     }
 
-    /// Portal's own sync rules. Read-only: nothing here acts on them.
-    pub async fn sync_rules(&self) -> Result<Vec<SyncRule>, PortalErr> {
-        let raw = self.get("/api/sync-rules").await?;
-        let rows = rows(&raw, "sync_rules")?;
-        let mut out: Vec<SyncRule> = Vec::with_capacity(rows.len());
-        for r in rows {
-            out.push(serde_json::from_value(r).map_err(|e| PortalErr::Json(e.to_string()))?);
-        }
-        Ok(out)
-    }
-
     /// One GET, retried the way `api::Client` retries: exponential backoff from
     /// `netx::backoff`, a `Retry-After` honoured when Portal sends one, a
     /// connect error or timeout repeated (a GET is safe to repeat), and 429 or a
@@ -1288,7 +1252,7 @@ pub struct Who {
 /// The list inside a Portal reply.
 ///
 /// A bare array, or an object that carries it under the endpoint's own name
-/// (`upload_links`, `sync_rules`), or under `data` / `items` / `results` /
+/// (`upload_links`), or under `data` / `items` / `results` /
 /// `rows`, one level down at most. `links` is deliberately not searched: it is
 /// how Frame.io's envelopes carry pagination, and reading a cursor as a list
 /// would be worse than saying the reply is not understood.

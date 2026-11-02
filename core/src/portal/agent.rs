@@ -509,6 +509,22 @@ fn segment_of(name: &str) -> String {
     s[..end].to_string()
 }
 
+/// What holds a project folder. An older Portal's mirror walks the whole
+/// folder, so it needs it alone; a synced link's watches sit in subfolders, so
+/// synced links may share one. Portal (2.2) names an unnamed link after its job
+/// folder, so a job's links meet there, as they do on Frame.io.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Base {
+    Mirror,
+    Sync,
+}
+
+/// A path as the file system compares it: macOS and Windows ignore case by
+/// default, so `RUSHES` and `Rushes` are one folder.
+fn fold(path: &str) -> String {
+    path.to_lowercase()
+}
+
 /// Turns Portal's rows into the watches they call for, reporting (not acting on)
 /// the ones that cannot be.
 ///
@@ -520,7 +536,9 @@ fn segment_of(name: &str) -> String {
 /// left alone.
 fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut Report) -> Vec<Target> {
     let mut out: Vec<Target> = Vec::new();
-    let mut claimed: BTreeSet<String> = BTreeSet::new();
+    // Project folders and synced links' folders, by `fold`ed path.
+    let mut bases: BTreeMap<String, Base> = BTreeMap::new();
+    let mut mapped: BTreeMap<String, Mapped> = BTreeMap::new();
     // Sorted by id so two runs over the same rows decide the same way.
     let mut by_id: BTreeMap<String, &UploadLink> = BTreeMap::new();
     for l in links {
@@ -561,11 +579,11 @@ fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut 
             rep.skipped.push(skip(format!("{} is not directly under {}", base.display(), root.display())));
             continue;
         }
-        // A project folder belongs to one link: the lower id wins it, run after
-        // run. Its folders live inside it, so a second link on the same name
-        // could otherwise have its mirror walk the first link's one-way
-        // folders. Claimed only once the link has been cleared to make
-        // something, so a broken link never takes the folder from a good one.
+        // A mirror's project folder belongs to one link: the lower id wins it,
+        // run after run, since the mirror would otherwise walk another link's
+        // one-way folders. Synced links share theirs ([`Base`]). Claimed only
+        // once the link has been cleared to make something, so a broken link
+        // never takes the folder from a good one.
         let base_s = base.to_string_lossy().into_owned();
         let label = l.label();
 
@@ -578,10 +596,11 @@ fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut 
                 ));
                 continue;
             }
-            if !claimed.insert(base_s.clone()) {
+            if bases.contains_key(&fold(&base_s)) {
                 rep.skipped.push(skip(format!("{} is another link's folder already", base_s)));
                 continue;
             }
+            bases.insert(fold(&base_s), Base::Mirror);
             out.push(Target {
                 link: id.clone(),
                 marker: name,
@@ -605,7 +624,17 @@ fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut 
             ));
             continue;
         }
-        if !claimed.insert(base_s.clone()) {
+        // The upload watch's origin is `portal:<id>#exports`, so an id that
+        // already holds a `#` could name another link's watch. Such a link is
+        // refused rather than given an origin that might be somebody else's.
+        if sync.upload.is_some() && id.contains('#') {
+            rep.skipped.push(skip(format!(
+                "the link id {:?} contains '#', which the upload watch's origin is built from",
+                id
+            )));
+            continue;
+        }
+        if *bases.entry(fold(&base_s)).or_insert(Base::Sync) == Base::Mirror {
             rep.skipped.push(skip(format!("{} is another link's folder already", base_s)));
             continue;
         }
@@ -619,16 +648,6 @@ fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut 
                 SYNC_ADD_ONLY
             ));
         }
-        // The upload watch's origin is `portal:<id>#exports`, so an id that
-        // already holds a `#` could name another link's watch. Such a link is
-        // refused rather than given an origin that might be somebody else's.
-        if sync.upload.is_some() && id.contains('#') {
-            rep.skipped.push(skip(format!(
-                "the link id {:?} contains '#', which the upload watch's origin is built from",
-                id
-            )));
-            continue;
-        }
         let ctx = LinkCtx { id: &id, marker: &name, base: &base, acct: &acct, rule };
         let or_default = |local: &str, default: &str| {
             let local = local.trim();
@@ -641,8 +660,8 @@ fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut 
         let d = sync.download.clone().unwrap_or_default();
         let down = SyncFolder { local: or_default(&d.local, &names.download), folder_id: d.folder_id };
         let down_folder = if down.folder_id.is_empty() { folder.clone() } else { down.folder_id.clone() };
-        match mapping(&ctx, &mut claimed, "download", &down, &down_folder, DIR_DOWNLOAD, origin_of(&id), label.clone()) {
-            Ok(t) => out.push(t),
+        match mapping(&ctx, &mut mapped, "download", &down, &down_folder, DIR_DOWNLOAD, origin_of(&id), label.clone()) {
+            Ok(t) => out.extend(t),
             Err(e) => rep.skipped.push(skip(e)),
         }
 
@@ -656,7 +675,7 @@ fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut 
                 ));
                 continue;
             }
-            if up.local == down.local {
+            if fold(&up.local) == fold(&down.local) {
                 rep.skipped.push(skip(format!(
                     "the upload folder {:?} is the download folder: one folder cannot be both one-way",
                     up.local
@@ -671,8 +690,8 @@ fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut 
                 continue;
             }
             let up_label = format!("{} ({})", label, up.local);
-            match mapping(&ctx, &mut claimed, "upload", &up, &up.folder_id, DIR_UPLOAD, exports_origin_of(&id), up_label) {
-                Ok(t) => out.push(t),
+            match mapping(&ctx, &mut mapped, "upload", &up, &up.folder_id, DIR_UPLOAD, exports_origin_of(&id), up_label) {
+                Ok(t) => out.extend(t),
                 Err(e) => rep.skipped.push(skip(e)),
             }
         }
@@ -680,23 +699,29 @@ fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut 
     out
 }
 
+/// What a synced link's folder is already a watch of: account, Frame.io folder,
+/// direction.
+type Mapped = (String, String, String);
+
 /// One side of a `sync` mapping, as the watch it calls for.
 ///
 /// The local name is checked by the same rule the marker gets, and the folder it
 /// makes must stay under `root/<marker>/` — the marker folder, not the root, is
 /// as far as a mapping may reach. A refusal is returned as the sentence the
-/// report carries; nothing is created for it.
+/// report carries; nothing is created for it. `None` is a folder an earlier link
+/// already watches the same way (a job's links sharing one return folder): one
+/// watch, the lower id's, serves both.
 #[allow(clippy::too_many_arguments)]
 fn mapping(
     ctx: &LinkCtx<'_>,
-    claimed: &mut BTreeSet<String>,
+    mapped: &mut BTreeMap<String, Mapped>,
     side: &str,
     m: &SyncFolder,
     folder: &str,
     direction: &str,
     origin: String,
     label: String,
-) -> Result<Target, String> {
+) -> Result<Option<Target>, String> {
     if let Err(e) = check_local(&m.local) {
         return Err(format!("the {} folder: {}", side, e));
     }
@@ -710,10 +735,15 @@ fn mapping(
         return Err(format!("the {} folder names no Frame.io folder", side));
     }
     let local = local.to_string_lossy().into_owned();
-    if !claimed.insert(local.clone()) {
-        return Err(format!("{} is another mapping's folder already", local));
+    let watch = (ctx.acct.to_string(), folder.to_string(), direction.to_string());
+    match mapped.get(&fold(&local)) {
+        None => {
+            mapped.insert(fold(&local), watch);
+        }
+        Some(w) if *w == watch => return Ok(None),
+        Some(_) => return Err(format!("{} is another mapping's folder already", local)),
     }
-    Ok(Target {
+    Ok(Some(Target {
         link: ctx.id.to_string(),
         marker: ctx.marker.to_string(),
         local,
@@ -723,7 +753,7 @@ fn mapping(
         rule: ctx.rule.to_string(),
         direction: direction.to_string(),
         origin,
-    })
+    }))
 }
 
 /// Starts the poller: every `Settings::portal_every_secs`, while Portal is on.
@@ -1106,6 +1136,87 @@ mod tests {
         ]);
         assert_eq!(origins(&t), vec![origin_of("L1")], "the lower id owns the marker folder");
         assert!(rep.skipped[0].reason.contains("another link's folder"), "{}", rep.skipped[0].reason);
+    }
+
+    /// A row of `GET /api/upload-links` as Portal 2.2 renders it: an unnamed
+    /// link is named after its job folder, `sync` carries the Frame.io folders'
+    /// names as `local`, and `return_link` is the Send link on the return folder.
+    fn row_2_2(id: &str, folder_id: &str, folder: &str, return_id: &str, return_name: &str) -> UploadLink {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "kind": "upload", "name": "2026_10_30_TestMcTest", "token": "t",
+            "public_url": "https://portal.example/u/t", "state": "ok",
+            "folder": {
+                "type": "frameio", "account_id": "A1", "workspace_id": "W1", "project_id": "P1",
+                "folder_id": folder_id, "folder_name": folder, "project_name": "ACME",
+                "path": [
+                    {"id": "R", "name": "ACME (root)"},
+                    {"id": "J", "name": "2026_10_30_TestMcTest"},
+                    {"id": folder_id, "name": folder}
+                ],
+                "path_resolved_at": "2026-11-02T09:00:00Z",
+                "sync": {"download": {"local": folder}, "upload": {"folder_id": return_id, "local": return_name}}
+            },
+            "turbosort": null, "expires_at": null, "password_protected": false, "max_file_size": null,
+            "allowed_extensions": null, "uploader_fields_required": {"name": true, "email": false, "message": false},
+            "verify_email": false, "target_folder_id": null, "target_folder_name": null, "subfolder_template": null,
+            "brand_display_name": null, "brand_subtitle": null, "revoked_at": null,
+            "created_at": "2026-11-02T09:00:00Z",
+            "return_link": {"id": "S1", "public_url": "https://portal.example/d/s"},
+            "notify_emails": null, "remind_before_expiry": false
+        }))
+        .expect("Portal 2.2's row")
+    }
+
+    #[test]
+    fn a_jobs_links_share_its_folder_and_one_return_folder_is_one_watch() {
+        let (t, rep) = plan_of(&[
+            row_2_2("L1", "F-RUSHES", "RUSHES", "F-RENDER", "RENDER"),
+            row_2_2("L2", "F-AUDIO", "AUDIO", "F-RENDER", "RENDER"),
+        ]);
+        assert!(rep.skipped.is_empty() && rep.notes.is_empty(), "{:?} {:?}", rep.skipped, rep.notes);
+        assert_eq!(
+            locals(&t),
+            vec![
+                "/root/Portal/2026_10_30_TestMcTest/RUSHES",
+                "/root/Portal/2026_10_30_TestMcTest/RENDER",
+                "/root/Portal/2026_10_30_TestMcTest/AUDIO",
+            ]
+        );
+        assert_eq!(origins(&t), vec![origin_of("L1"), exports_origin_of("L1"), origin_of("L2")], "the lower id's watch serves both");
+        assert_eq!((t[1].folder.as_str(), t[1].direction.as_str()), ("F-RENDER", DIR_UPLOAD));
+        assert_eq!((t[2].folder.as_str(), t[2].direction.as_str()), ("F-AUDIO", DIR_DOWNLOAD));
+    }
+
+    #[test]
+    fn one_folder_name_for_two_frame_io_folders_is_the_lower_ids() {
+        let (t, rep) = plan_of(&[
+            row_2_2("L1", "F-RUSHES", "RUSHES", "F-RENDER", "RENDER"),
+            row_2_2("L2", "F-AUDIO", "AUDIO", "F-RENDER-2", "RENDER"),
+        ]);
+        assert_eq!(origins(&t), vec![origin_of("L1"), exports_origin_of("L1"), origin_of("L2")]);
+        assert_eq!(rep.skipped.len(), 1);
+        assert_eq!(rep.skipped[0].link, "L2");
+        assert!(rep.skipped[0].reason.contains("another mapping's folder"), "{}", rep.skipped[0].reason);
+    }
+
+    #[test]
+    fn names_that_differ_only_in_case_are_one_folder() {
+        // One link: on macOS both watches would be one folder, and what comes
+        // down would go straight back up.
+        let (t, rep) = plan_of(&[sync_link("L1", "Rakete", side("Rushes", "FD"), side("RUSHES", "FX"))]);
+        assert_eq!(locals(&t), vec!["/root/Portal/Rakete/Rushes"]);
+        assert!(rep.skipped[0].reason.contains("is the download folder"), "{}", rep.skipped[0].reason);
+        // Two links in one project folder.
+        let (t, rep) = plan_of(&[
+            row_2_2("L1", "F-RUSHES", "Rushes", "F-RENDER", "RENDER"),
+            row_2_2("L2", "F-OTHER", "RUSHES", "F-RENDER", "RENDER"),
+        ]);
+        assert_eq!(origins(&t), vec![origin_of("L1"), exports_origin_of("L1")]);
+        assert!(rep.skipped[0].reason.contains("another mapping's folder"), "{}", rep.skipped[0].reason);
+        // Project folders.
+        let (t, rep) = plan_of(&[link("L1", "Acme"), link("L2", "ACME"), sync_link("L3", "acme", None, None)]);
+        assert_eq!(origins(&t), vec![origin_of("L1")]);
+        assert_eq!(rep.skipped.len(), 2, "{:?}", rep.skipped);
     }
 
     #[test]

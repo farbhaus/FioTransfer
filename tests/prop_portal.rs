@@ -171,7 +171,6 @@ async fn answer(mut c: TcpStream, st: Arc<StubState>) {
                 (code, st.links.lock().unwrap().clone())
             }
         }
-        "/api/sync-rules" => (200, r#"{"data":[]}"#.to_string()),
         _ => (404, r#"{"error":"no route"}"#.to_string()),
     };
     let resp = format!(
@@ -378,7 +377,8 @@ fn marker_ok(m: &str) -> bool {
 }
 
 /// Which marker each link should own, and whose watch it is: the model, by link
-/// id order, first claim of a folder wins.
+/// id order, first claim of a folder wins. Case is ignored, as on macOS: `ab`
+/// and `AB` are one folder.
 fn expected(specs: &[LinkSpec]) -> BTreeMap<String, String> {
     let mut by_id: BTreeMap<String, &LinkSpec> = BTreeMap::new();
     for s in specs {
@@ -394,7 +394,7 @@ fn expected(specs: &[LinkSpec]) -> BTreeMap<String, String> {
         if m.is_empty() || s.disabled || !marker_ok(&m) || s.acct.is_none() || s.folder.is_none() {
             continue;
         }
-        if claimed.insert(m.clone()) {
+        if claimed.insert(m.to_lowercase()) {
             out.insert(m, id);
         }
     }
@@ -938,6 +938,68 @@ fn an_expired_or_revoked_link_stops_and_leaves_its_folder() {
     assert_eq!(ws.len(), 1, "{:?}", ws);
     assert_eq!(ws[0].local_path, w.root.join("Project L2/IN").to_string_lossy().into_owned());
     assert!(w.root.join("Project L1/IN").is_dir(), "the revoked link's folder stays");
+}
+
+/// Portal 2.2 names an unnamed link after its job folder and its folders after
+/// Frame.io's, so a job's links meet in one project folder and may share a
+/// return folder: one watch serves it, a second run changes nothing, and when
+/// the link that owns it closes, the other link takes it over.
+#[test]
+fn a_jobs_links_share_one_folder_and_hand_the_return_folder_on() {
+    let w = World::new();
+    let row = |id: &str, folder: &str, state: &str| {
+        let mut row = sync_row(
+            id,
+            "",
+            json!({"download": {"local": folder}, "upload": {"local": "RENDER", "folder_id": "F-RENDER"}}),
+        );
+        row["name"] = json!("2026_10_30_TestMcTest");
+        row["target_folder_id"] = Value::Null;
+        row["folder"]["folder_id"] = json!(format!("F-{folder}"));
+        row["state"] = json!(state);
+        row["return_link"] = json!({"id": "S1", "public_url": "https://portal.example/d/s"});
+        row
+    };
+    let job = w.root.join("2026_10_30_TestMcTest");
+    let at = |name: &str| job.join(name).to_string_lossy().into_owned();
+    let watches = |w: &World| {
+        let mut v: Vec<(String, String, String, String)> = w
+            .portal_watches()
+            .into_iter()
+            .map(|r| (r.local_path, r.origin, r.direction, r.folder_id))
+            .collect();
+        v.sort();
+        v
+    };
+
+    w.stub.links(vec![row("L1", "RUSHES", "ok"), row("L2", "AUDIO", "ok")]);
+    let rep = w.reconcile();
+    assert!(rep.error.is_empty() && rep.skipped.is_empty(), "{} {:?}", rep.error, rep.skipped);
+    let first = watches(&w);
+    assert_eq!(
+        first,
+        vec![
+            (at("AUDIO"), "portal:L2".into(), "download".into(), "F-AUDIO".into()),
+            (at("RENDER"), "portal:L1#exports".into(), "upload".into(), "F-RENDER".into()),
+            (at("RUSHES"), "portal:L1".into(), "download".into(), "F-RUSHES".into()),
+        ]
+    );
+
+    let rep = w.reconcile();
+    assert_eq!((rep.ensured, rep.removed), (0, 0), "a second run changes nothing: {:?}", rep.skipped);
+    assert_eq!(watches(&w), first);
+
+    w.stub.links(vec![row("L1", "RUSHES", "revoked"), row("L2", "AUDIO", "ok")]);
+    let rep = w.reconcile();
+    assert!(rep.error.is_empty(), "{}", rep.error);
+    assert_eq!(
+        watches(&w),
+        vec![
+            (at("AUDIO"), "portal:L2".into(), "download".into(), "F-AUDIO".into()),
+            (at("RENDER"), "portal:L2#exports".into(), "upload".into(), "F-RENDER".into()),
+        ]
+    );
+    assert!(job.join("RUSHES").is_dir(), "the revoked link's folder stays");
 }
 
 /// What Portal does to an older link, as its dev described it: the stored
