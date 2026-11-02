@@ -37,32 +37,35 @@ fn ca_params() -> Result<CertificateParams, String> {
     Ok(p)
 }
 
-/// Loads or creates the local certificate authority.
-fn local_ca() -> Result<(CertificateParams, KeyPair), String> {
+/// Loads or creates the local certificate authority: its PEM and its key.
+fn local_ca() -> Result<(String, KeyPair), String> {
     let cert_path = pem_file("local-ca.pem");
     let key_path = pem_file("local-ca-key.pem");
     let marker = config::dir().join(CA_MARKER);
     if marker.exists() {
-        if let Ok(key_text) = std::fs::read_to_string(&key_path) {
+        if let (Ok(cert_text), Ok(key_text)) = (std::fs::read_to_string(&cert_path), std::fs::read_to_string(&key_path)) {
             if let Ok(key) = KeyPair::from_pem(&key_text) {
-                if cert_path.exists() {
-                    return Ok((ca_params()?, key));
-                }
+                return Ok((cert_text, key));
             }
         }
     } else if cert_path.exists() {
-        // A CA from an earlier build without name constraints: replace it, and
-        // leave the file for trust_local_cert to remove from the keychain.
+        // A CA from an earlier build (the Go app's too, which wrote no marker):
+        // replace it, and leave the file for trust_local_cert to remove from
+        // the keychain.
         let _ = std::fs::rename(&cert_path, pem_file(OLD_CA_FILE));
     }
+    // The localhost certificate is signed by the CA being replaced. It still
+    // verifies until trust_local_cert untrusts that CA, and then the browser
+    // would refuse it.
+    let _ = std::fs::remove_file(pem_file("localhost.pem"));
+    let _ = std::fs::remove_file(pem_file("localhost-key.pem"));
 
     let key = KeyPair::generate().map_err(|e| e.to_string())?;
-    let params = ca_params()?;
-    let cert = params.self_signed(&key).map_err(|e| e.to_string())?;
+    let cert = ca_params()?.self_signed(&key).map_err(|e| e.to_string())?;
     std::fs::write(&key_path, key.serialize_pem()).map_err(|e| e.to_string())?;
     std::fs::write(&cert_path, cert.pem()).map_err(|e| e.to_string())?;
     let _ = std::fs::write(&marker, b"1");
-    Ok((params, key))
+    Ok((cert.pem(), key))
 }
 
 pub struct LocalCert {
@@ -72,7 +75,7 @@ pub struct LocalCert {
 
 /// The localhost certificate (signed by the local CA) and the CA's PEM path.
 pub fn local_cert() -> Result<LocalCert, String> {
-    let (ca_params, ca_key) = local_ca()?;
+    let (ca_pem, ca_key) = local_ca()?;
     let ca_path = pem_file("local-ca.pem");
     let cert_path = pem_file("localhost.pem");
     let key_path = pem_file("localhost-key.pem");
@@ -90,41 +93,58 @@ pub fn local_cert() -> Result<LocalCert, String> {
     let (cert_pem, key_pem) = match leaf_ok() {
         Some(v) => v,
         None => {
-            let issuer = Issuer::from_params(&ca_params, &ca_key);
-            let leaf_key = KeyPair::generate().map_err(|e| e.to_string())?;
-            let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
-            params.distinguished_name = DistinguishedName::new();
-            params.distinguished_name.push(DnType::CommonName, "localhost");
-            params.distinguished_name.push(DnType::OrganizationName, "FioTransfer");
-            params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-            params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-            params.subject_alt_names = vec![
-                SanType::DnsName("localhost".try_into().map_err(|e: rcgen::Error| e.to_string())?),
-                SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
-                SanType::IpAddress(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
-            ];
-            // Within Apple's 398-day limit for TLS certificates.
-            params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(397);
-            let cert = params.signed_by(&leaf_key, &issuer).map_err(|e| e.to_string())?;
-            let cp = cert.pem();
-            let kp = leaf_key.serialize_pem();
+            let (cp, kp) = mint_leaf(&ca_pem, &ca_key)?;
             std::fs::write(&cert_path, &cp).map_err(|e| e.to_string())?;
             std::fs::write(&key_path, &kp).map_err(|e| e.to_string())?;
             (cp, kp)
         }
     };
+    Ok(LocalCert { config: server_config(&cert_pem, &key_pem)?, ca_path })
+}
 
+/// A localhost certificate and its key (PEM), signed by the CA. The issuer's
+/// name is read from the CA as stored: `ca_params()` names it after today's
+/// hostname, and a leaf naming another issuer doesn't chain to it.
+fn mint_leaf(ca_pem: &str, ca_key: &KeyPair) -> Result<(String, String), String> {
+    let issuer = Issuer::from_ca_cert_pem(ca_pem, ca_key).map_err(|e| e.to_string())?;
+    let leaf_key = KeyPair::generate().map_err(|e| e.to_string())?;
+    let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
+    params.distinguished_name = DistinguishedName::new();
+    params.distinguished_name.push(DnType::CommonName, "localhost");
+    params.distinguished_name.push(DnType::OrganizationName, "FioTransfer");
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.subject_alt_names = vec![
+        SanType::DnsName("localhost".try_into().map_err(|e: rcgen::Error| e.to_string())?),
+        SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
+        SanType::IpAddress(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+    ];
+    // Within Apple's 398-day limit for TLS certificates.
+    params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(397);
+    let cert = params.signed_by(&leaf_key, &issuer).map_err(|e| e.to_string())?;
+    Ok((cert.pem(), leaf_key.serialize_pem()))
+}
+
+/// The callback server's TLS config. The crypto provider is named here:
+/// reqwest 0.13 compiles in aws-lc-rs and the updater's reqwest 0.12 ring, and
+/// with both rustls has no process default, so `ServerConfig::builder()`
+/// panics (2.0.0 and 2.0.1 quit on every Sign in).
+fn server_config(cert_pem: &str, key_pem: &str) -> Result<std::sync::Arc<tokio_rustls::rustls::ServerConfig>, String> {
+    use tokio_rustls::rustls;
     use tokio_rustls::rustls::pki_types::pem::PemObject;
     use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     let key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).map_err(|e| e.to_string())?;
-    let config = tokio_rustls::rustls::ServerConfig::builder()
+    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| e.to_string())?;
-    Ok(LocalCert { config: std::sync::Arc::new(config), ca_path })
+    Ok(std::sync::Arc::new(config))
 }
 
 /// Makes macOS trust the local CA (one password prompt, first time only).
@@ -158,4 +178,32 @@ fn untrust(path: &std::path::Path) {
     }
     let _ = std::process::Command::new("/usr/bin/security").args(["remove-trusted-cert", &path.to_string_lossy()]).status();
     let _ = std::fs::remove_file(path);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // What Sign in builds, for a CA made under another hostname (and with its
+    // name in the Go app's order): the leaf names that CA as its issuer, and
+    // the config builds without a process-level crypto provider.
+    #[test]
+    fn a_leaf_from_a_stored_ca_serves() {
+        let ca_key = KeyPair::generate().unwrap();
+        let mut p = ca_params().unwrap();
+        p.distinguished_name = DistinguishedName::new();
+        p.distinguished_name.push(DnType::OrganizationName, "FioTransfer");
+        p.distinguished_name.push(DnType::CommonName, "FioTransfer Local CA (old-name.local)");
+        let ca_pem = p.self_signed(&ca_key).unwrap().pem();
+        let (cert_pem, key_pem) = mint_leaf(&ca_pem, &ca_key).unwrap();
+
+        let (_, ca) = x509_parser::pem::parse_x509_pem(ca_pem.as_bytes()).unwrap();
+        let ca = ca.parse_x509().unwrap();
+        let (_, leaf) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).unwrap();
+        let leaf = leaf.parse_x509().unwrap();
+        assert_eq!(leaf.issuer().as_raw(), ca.subject().as_raw());
+
+        assert!(tokio_rustls::rustls::crypto::CryptoProvider::get_default().is_none());
+        server_config(&cert_pem, &key_pem).unwrap();
+    }
 }
