@@ -209,6 +209,7 @@ fn state_for(source: &str, parts: usize, created: i64) -> UploadState {
         mtime_ms: 7,
         created_at: created,
         view_url: "http://view/1".into(),
+        media_type: "video/mp4".into(),
         parts: arb_parts(parts),
     }
 }

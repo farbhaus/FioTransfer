@@ -68,6 +68,7 @@ fn state(source: &str, file_id: &str, sizes: &[i64], created_at: i64) -> UploadS
         mtime_ms: 1234,
         created_at,
         view_url: "http://view/1".into(),
+        media_type: "video/mp4".into(),
         parts,
     }
 }

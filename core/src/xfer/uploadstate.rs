@@ -47,6 +47,11 @@ pub struct UploadState {
     /// The page Frame.io shows for the file once it is complete.
     #[serde(default)]
     pub view_url: String,
+    /// The Content-Type every part URL is signed for (`local_upload`'s
+    /// `media_type`). Empty in a ledger an earlier build wrote, which sent the
+    /// wrong one: such a ledger is not resumed.
+    #[serde(default)]
+    pub media_type: String,
     pub parts: Vec<PartState>,
 }
 
@@ -235,6 +240,7 @@ mod tests {
             mtime_ms,
             created_at: now,
             view_url: "http://view/1".into(),
+            media_type: "video/mp4".into(),
             parts: vec![
                 PartState { off: 0, size: 4, url: "http://x/0".into() },
                 PartState { off: 4, size: 4, url: "http://x/1".into() },

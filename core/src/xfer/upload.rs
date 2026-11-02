@@ -106,7 +106,9 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
     let now = uploadstate::now_ms();
     let candidate = ledger.load(size, mtime, now);
     let saved = match candidate {
-        Some((saved, done)) if saved.account_id == acct && saved.folder_id == parent && saved.name == f.name => {
+        Some((saved, done))
+            if saved.account_id == acct && saved.folder_id == parent && saved.name == f.name && !saved.media_type.is_empty() =>
+        {
             Some((saved, done))
         }
         other => {
@@ -123,7 +125,7 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
         }
     };
 
-    let (file_id, view_url, parts, done, resuming) = match saved {
+    let (file_id, view_url, content_type, parts, done, resuming) = match saved {
         Some((saved, done)) => {
             let parts: Vec<Part> = saved
                 .parts
@@ -131,12 +133,17 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
                 .map(|p| Part { off: p.off, size: p.size, url: p.url.clone() })
                 .collect();
             let already = done.iter().filter(|d| **d).count();
-            (saved.file_id, saved.view_url, parts, done, already)
+            (saved.file_id, saved.view_url, saved.media_type, parts, done, already)
         }
         None => {
             let lu = match m.api.create_local_upload(&j.cx, &acct, &parent, &f.name, size).await {
                 Ok(l) => l,
                 Err(e) => return Err(format!("creating file on Frame.io: {}", e)),
+            };
+            // The part URLs are signed for this type: any other gets 403.
+            let content_type = match lu.media_type.as_deref() {
+                Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+                _ => "application/octet-stream".to_string(),
             };
             let mut parts: Vec<Part> = Vec::with_capacity(lu.upload_urls.len());
             let mut off: i64 = 0;
@@ -154,6 +161,7 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
                 mtime_ms: mtime,
                 created_at: now,
                 view_url: lu.view_url.clone(),
+                media_type: content_type.clone(),
                 parts: parts
                     .iter()
                     .map(|p| uploadstate::PartState { off: p.off, size: p.size, url: p.url.clone() })
@@ -164,7 +172,7 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
                 m.hist.log(&format!("{} resume   [{}] {} — couldn't record the upload for resuming: {}", kind_tag(&j.kind), j.id, f.rel_path, e));
             }
             let fresh_flags = vec![false; parts.len()];
-            (lu.id, lu.view_url, parts, fresh_flags, 0)
+            (lu.id, lu.view_url, content_type, parts, fresh_flags, 0)
         }
     };
 
@@ -179,7 +187,6 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
     let t_settle = t0.elapsed();
     let started = Instant::now();
 
-    let content_type = "application/octet-stream".to_string();
     if resuming > 0 {
         m.hist.log(&format!(
             "{} resume   [{}] {} — {}/{} parts already on Frame.io",
