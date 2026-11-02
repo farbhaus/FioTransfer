@@ -39,11 +39,6 @@ time = { version = "0.3.55", features = ["formatting", "parsing"] }
 bytes = "1.12.1"
 cargo-packager-updater = "0.2.3"
 
-# The Keychain exists only on macOS; `secret.rs` falls back to its 0600 file
-# elsewhere, which is what the Linux and Windows builds of the app do.
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3.7.0"
-
 [dev-dependencies]
 # The unit tests in the modules that moved here carry their own property tests.
 proptest = "1.12.0"
