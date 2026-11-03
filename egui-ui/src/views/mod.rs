@@ -1,6 +1,7 @@
 //! One module per screen, plus the shared pieces of the shell.
 
 pub mod dest;
+pub mod drop;
 pub mod history;
 pub mod settings;
 pub mod sidebar;

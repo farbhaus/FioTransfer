@@ -119,6 +119,9 @@ impl FioApp {
     /// harness, which is why it takes a plain `&egui::Context` and no frame.
     pub fn draw(&mut self, ctx: &egui::Context) {
         apply_style_once(ctx);
+        // Files dropped on the window, asked for before the shell pumps so the
+        // upload starts this frame.
+        crate::views::drop::take(ctx, &mut self.state);
         // The shell goes first: requests out, answers in, the app read on its
         // tick — all before a single pixel of this frame.
         self.drive_shell(ctx);

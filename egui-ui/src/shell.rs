@@ -1190,6 +1190,9 @@ impl Shell {
     /// Uploads to the remembered destination; with none yet, the picker opens
     /// with the paths waiting for it (`startUpload`).
     fn start_upload(&mut self, ui: &mut UiState, paths: Vec<String>) {
+        if !can_upload(ui) {
+            return;
+        }
         if self.app.settings().last_folder_id.is_empty() {
             self.open_dest(ui, DestMode::Upload { pending: paths }, None);
             return;
@@ -1205,11 +1208,7 @@ impl Shell {
     /// Opens the picker (`openDest`, `openDestAt`): an upload at the remembered
     /// destination, the watch editor at its folder, otherwise at the accounts.
     fn open_dest(&mut self, ui: &mut UiState, mode: DestMode, at: Option<i32>) {
-        if !ui.logged_in {
-            // `ensureCanUpload`
-            let set_up = !ui.settings.client_id.is_empty();
-            ui.view = if set_up { View::Transfers } else { View::Settings };
-            ui.push_toast(if set_up { "Not signed in" } else { "Uploads not set up" }, ToastKind::Err);
+        if !can_upload(ui) {
             return;
         }
         let settings = self.app.settings();
@@ -1607,6 +1606,18 @@ fn path_crumb(n: &DestNode) -> PathCrumb {
     PathCrumb { id: n.id.clone(), name: n.name.clone(), kind: n.kind.clone(), folder_id: n.folder_id.clone() }
 }
 
+/// `ensureCanUpload`: signed in, or the screen that fixes it and a toast saying
+/// why not. A drop can come signed out; Files… and Folder… cannot.
+fn can_upload(ui: &mut UiState) -> bool {
+    if ui.logged_in {
+        return true;
+    }
+    let set_up = !ui.settings.client_id.is_empty();
+    ui.view = if set_up { View::Transfers } else { View::Settings };
+    ui.push_toast(if set_up { "Not signed in" } else { "Uploads not set up" }, ToastKind::Err);
+    false
+}
+
 /// A message for the user, from a thread that cannot touch the window.
 fn toast(tx: &Sender<Update>, text: impl Into<String>, kind: ToastKind) {
     let _ = tx.send(Update::Done(Done::Toast { text: text.into(), kind }));
@@ -1819,5 +1830,22 @@ mod tests {
             }
             other => panic!("not a toast: {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_upload_signed_out_shows_where_to_fix_it() {
+        let mut ui = UiState { view: View::History, ..UiState::default() };
+        assert!(!can_upload(&mut ui));
+        assert_eq!((ui.view, ui.toasts[0].text.as_str()), (View::Settings, "Uploads not set up"));
+
+        ui.settings.client_id = "client".into();
+        ui.toasts.clear();
+        assert!(!can_upload(&mut ui));
+        assert_eq!((ui.view, ui.toasts[0].text.as_str()), (View::Transfers, "Not signed in"));
+
+        let mut ui = UiState { view: View::History, logged_in: true, ..UiState::default() };
+        assert!(can_upload(&mut ui));
+        assert!(ui.toasts.is_empty());
+        assert_eq!(ui.view, View::History);
     }
 }
