@@ -37,6 +37,7 @@
 //! Frame.io), so every string field also goes through [`nullable`].
 
 pub mod agent;
+pub mod heartbeat;
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -511,9 +512,11 @@ pub struct Folder {
 /// folder it belongs to.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SyncFolder {
-    /// One path segment under the project's folder, or empty for the user's
-    /// default (`Settings::portal_in_folder` / `portal_out_folder`). The same
-    /// rule as a project folder: no `/`, `\`, `%`, control characters, `.` or `..`.
+    /// One path segment under the project's folder, used as Portal sends it.
+    /// Portal always sets it; only an unmigrated 2.2 row may leave it empty,
+    /// which is `IN` / `OUT` ([`agent::UNNAMED_IN`], [`agent::UNNAMED_OUT`]).
+    /// The same rule as a project folder: no `/`, `\`, `%`, control characters,
+    /// `.` or `..`.
     pub local: String,
     /// The Frame.io folder. Empty when Portal named none: for the download side
     /// that means the link's own folder, and for the upload side there is
@@ -522,34 +525,40 @@ pub struct SyncFolder {
 }
 
 /// The `sync` object Portal adds **inside a link's `folder`** when the link is
-/// ticked "Sync to FioTransfer". Its presence is the opt-in; every field in it
-/// is optional:
+/// synced to FioTransfer, next to the link's `turbosort` (the project folder):
 ///
 /// ```json
+/// "turbosort": "ACME_SPOT",
 /// "folder": {
 ///   "type": "frameio", "account_id": "…", "folder_id": "…", "path": […],
+///   "turbosort": "ACME_SPOT",
 ///   "sync": {
-///     "name": "Acme Spot 30s",
-///     "download": {"local": "IN"},
-///     "upload":   {"local": "OUT", "folder_id": "…"}
+///     "mode": "add_only",
+///     "drive":   {"local": "1_DRIVE"},
+///     "exports": {"local": "0_EXPORTS", "folder_id": "…"}
 ///   }
 /// }
 /// ```
 ///
-/// `name` is the project's folder on disk (default: the link's name).
-/// `download` is where the client's files come down (default: the link's own
-/// folder, into the user's IN folder); `upload` is a folder whose files go back
-/// up, only when Portal names its Frame.io folder. `"sync": {}` is a link
-/// synced with the defaults. Nothing is deleted at either end.
+/// `drive` (Imports) is where the client's files come down, from its
+/// `folder_id` or the link's own folder; `exports` (Exports) is a folder whose
+/// files go up to its `folder_id`. A lane that is absent is off, and Portal
+/// sends at least one. `local` is the lane's folder on disk; Portal always sets
+/// it. Nothing is deleted at either end. An unknown `mode` is read as
+/// `add_only`, the only one there is, and noted.
 ///
-/// Older Portals call the sides `drive` and `exports`; both are still read. An
-/// unknown `mode` is read as `add_only`, the only one there is, and noted.
+/// Portal 2.2 and 2.3 wrote `download`, `upload` and `name` instead, or just
+/// `{}`, and every synced link downloaded. Portal's migration rewrites those
+/// rows to the shape above, and one not yet rewritten is read the same way: its
+/// download side is always there (`sync_at`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Sync {
     pub mode: String,
-    /// The project folder's name, when Portal sets one.
+    /// Portal 2.2's name for the project folder. `turbosort` comes first.
     pub name: String,
+    /// Imports (`drive`): `None` when the lane is off.
     pub download: Option<SyncFolder>,
+    /// Exports (`exports`): `None` when the lane is off.
     pub upload: Option<SyncFolder>,
 }
 
@@ -576,18 +585,22 @@ impl Sync {
 /// A `sync` that is present but not an object is read as absent: the link is
 /// not synced. Guessing here could turn a one-way folder into something else;
 /// leaving it alone means a malformed row changes nothing.
+///
+/// A row with a `drive` or `exports` lane is in the contract's shape, where an
+/// absent lane is off. Any other is Portal 2.2's (`download`/`upload`, or `{}`)
+/// and is read as Portal's migration rewrites it: it always downloads.
 fn sync_at(v: &Value) -> Option<Sync> {
     let s = v.get("sync")?;
     if !s.is_object() {
         return None;
     }
-    let side = |new: &str, old: &str| sync_folder_at(s.get(new)).or_else(|| sync_folder_at(s.get(old)));
-    Some(Sync {
-        mode: text_at(s, "mode"),
-        name: text_at(s, "name"),
-        download: side("download", "drive"),
-        upload: side("upload", "exports"),
-    })
+    let (drive, exports) = (sync_folder_at(s.get("drive")), sync_folder_at(s.get("exports")));
+    let (download, upload) = if drive.is_some() || exports.is_some() {
+        (drive, exports)
+    } else {
+        (Some(sync_folder_at(s.get("download")).unwrap_or_default()), sync_folder_at(s.get("upload")))
+    };
+    Some(Sync { mode: text_at(s, "mode"), name: text_at(s, "name"), download, upload })
 }
 
 /// One side of a `sync` object. A side that is absent, `null` or not an object
@@ -678,8 +691,8 @@ pub struct UploadLink {
     pub target_account_id: String,
     #[serde(default, deserialize_with = "nullable")]
     pub account_id: String,
-    /// An older Portal's name for the project folder (`.turbosort`). A link
-    /// with one and no `sync` is one mirrored folder of that name.
+    /// The project folder, `<portal root>/<turbosort>`. Portal sends it with
+    /// every `sync`; a link with one and no `sync` is one mirrored folder.
     #[serde(default, deserialize_with = "nullable")]
     pub turbosort: String,
     /// The Frame.io folder, as an object or as a bare name.
@@ -877,6 +890,15 @@ impl std::fmt::Debug for PortalClient {
             .field("waiting_for_a_code", &self.pending.is_some())
             .finish()
     }
+}
+
+/// What a retry may repeat: a `GET` is safe to send again whatever happened; a
+/// `POST` only when it provably did not reach Portal (a connect error) or was
+/// refused before acting (429).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repeat {
+    Always,
+    OnlyUnsent,
 }
 
 impl PortalClient {
@@ -1173,6 +1195,31 @@ impl PortalClient {
     /// connect error or timeout repeated (a GET is safe to repeat), and 429 or a
     /// server error repeated. 4xx is the answer: it is not tried again.
     async fn get(&self, path: &str) -> Result<Vec<u8>, PortalErr> {
+        self.request(reqwest::Method::GET, path, None, Repeat::Always).await
+    }
+
+    /// One `POST` of a JSON body, on the same stack as [`PortalClient::get`]:
+    /// the same credential, the same backoff, the same [`PortalErr`] values.
+    ///
+    /// It is repeated only where a repeat cannot double an effect: a connect
+    /// error, which never reached Portal, and a 429, which Portal refused
+    /// before acting. A timeout, a 5xx or a broken connection is reported as it
+    /// is — the caller (`portal::heartbeat`) sends again on its next tick
+    /// rather than guess whether the first one was written.
+    pub async fn post_json(&self, path: &str, body: &[u8]) -> Result<Vec<u8>, PortalErr> {
+        self.request(reqwest::Method::POST, path, Some(body), Repeat::OnlyUnsent).await
+    }
+
+    /// One request, retried the way `api::Client` retries. `repeat` says what
+    /// may be sent twice: everything (`GET`), or only what provably did not
+    /// reach Portal (`POST`).
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&[u8]>,
+        repeat: Repeat,
+    ) -> Result<Vec<u8>, PortalErr> {
         if self.base.is_empty() {
             return Err(PortalErr::NoUrl);
         }
@@ -1186,9 +1233,12 @@ impl PortalClient {
         loop {
             // A bearer token goes in the header; a session's cookie is added to
             // every request by the client's cookie store, from the stored jar.
-            let mut req = self.http.get(&url).header("Accept", "application/json");
+            let mut req = self.http.request(method.clone(), &url).header("Accept", "application/json");
             if let Credential::Bearer(t) = &self.cred {
                 req = req.header("Authorization", format!("Bearer {}", t));
+            }
+            if let Some(b) = body {
+                req = req.header("Content-Type", "application/json").body(b.to_vec());
             }
             let res = req.send().await;
             let resp = match res {
@@ -1196,7 +1246,12 @@ impl PortalClient {
                 Err(e) => {
                     // A GET that never reached Portal can always be repeated; a
                     // 30 s timeout is the one case where it may have been read.
-                    if attempt >= MAX_ATTEMPTS || !(e.is_connect() || e.is_timeout()) {
+                    // A POST is repeated only when it never left this machine.
+                    let worth_repeating = match repeat {
+                        Repeat::Always => e.is_connect() || e.is_timeout(),
+                        Repeat::OnlyUnsent => e.is_connect(),
+                    };
+                    if attempt >= MAX_ATTEMPTS || !worth_repeating {
                         return Err(PortalErr::Http(e.to_string()));
                     }
                     let d = crate::netx::backoff(attempt);
@@ -1213,7 +1268,13 @@ impl PortalClient {
                 .and_then(|v| v.trim().parse::<u64>().ok());
             let data = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
             if status == 429 || status >= 500 {
-                if attempt >= MAX_ATTEMPTS {
+                // 429 was refused before Portal acted, so a POST may be
+                // repeated like a GET; a 5xx may have been acted on and may not.
+                let worth_repeating = match repeat {
+                    Repeat::Always => true,
+                    Repeat::OnlyUnsent => status == 429,
+                };
+                if !worth_repeating || attempt >= MAX_ATTEMPTS {
                     return Err(PortalErr::Status { status, body: crate::netx::trim_body(&data) });
                 }
                 let d = match retry_after {
@@ -1611,15 +1672,24 @@ mod tests {
             let raw = format!(r#"{{"id":"L1","folder":{{"folder_id":"F1","account_id":"A1","sync":{sync}}}}}"#);
             serde_json::from_str::<UploadLink>(&raw).expect("parses").folder.sync
         };
-        assert_eq!(parse("{}"), Some(Sync::default()), "ticked, with every default");
-        assert_eq!(parse("null"), None, "not ticked");
+        assert_eq!(parse("null"), None, "not synced");
+        // The contract: Chaos's lanes, and a lane that is absent is off.
+        let s = parse(r#"{"mode":"add_only","drive":{"local":"1_DRIVE"},"exports":{"local":"0_EXPORTS","folder_id":"FX"}}"#).unwrap();
+        assert_eq!(s.download, Some(SyncFolder { local: "1_DRIVE".into(), folder_id: String::new() }));
+        assert_eq!(s.upload, Some(SyncFolder { local: "0_EXPORTS".into(), folder_id: "FX".into() }));
+        let exports_only = parse(r#"{"mode":"add_only","exports":{"local":"0_EXPORTS","folder_id":"FX"}}"#).unwrap();
+        assert_eq!(exports_only.download, None, "Imports switched off stays off");
+        let s = parse(r#"{"mode":"add_only","drive":{"local":"1_DRIVE"},"upload":{"local":"OUT","folder_id":"FX"}}"#).unwrap();
+        assert_eq!(s.upload, None, "a contract row's Exports is `exports`, nothing else");
+        // Portal 2.2's rows, read as its migration rewrites them: always Imports.
+        let default_side = Some(SyncFolder::default());
+        assert_eq!(parse("{}"), Some(Sync { download: default_side.clone(), ..Sync::default() }));
         let s = parse(r#"{"name":"Acme","download":{"local":"IN"},"upload":{"local":"OUT","folder_id":"FX"}}"#).unwrap();
         assert_eq!(s.name, "Acme");
         assert_eq!(s.download, Some(SyncFolder { local: "IN".into(), folder_id: String::new() }));
         assert_eq!(s.upload, Some(SyncFolder { local: "OUT".into(), folder_id: "FX".into() }));
-        let old = parse(r#"{"mode":"add_only","drive":{"local":"1_DRIVE"},"exports":{"local":"0_EXPORTS","folder_id":"FX"}}"#).unwrap();
-        assert_eq!(old.download.unwrap().local, "1_DRIVE");
-        assert_eq!(old.upload.unwrap().folder_id, "FX");
+        let s = parse(r#"{"upload":{"local":"OUT","folder_id":"FX"}}"#).unwrap();
+        assert_eq!(s.download, default_side, "every 2.2 row downloaded");
     }
 
     #[test]

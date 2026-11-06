@@ -201,7 +201,6 @@ fn live_portal_watches_match_each_links_own_mapping() {
     let by_origin: std::collections::BTreeMap<String, _> =
         rows.iter().filter(|r| r.origin.starts_with("portal:")).map(|r| (r.origin.clone(), r)).collect();
 
-    let names = portal::agent::Names::of(&w.app.settings());
     let or = |local: &str, default: &str| {
         let local = local.trim();
         if local.is_empty() { default.to_string() } else { local.to_string() }
@@ -220,17 +219,21 @@ fn live_portal_watches_match_each_links_own_mapping() {
             }
             Some(sync) => {
                 println!("link {} is synced: {:?}", l.id, sync);
-                let d = sync.download.clone().unwrap_or_default();
-                let local = format!("{}/{}/{}", root, project, or(&d.local, &names.download));
-                let row = by_origin
-                    .get(&format!("portal:{}", l.id))
-                    .unwrap_or_else(|| panic!("no download watch for {} at {}", l.id, local));
-                assert_eq!(row.local_path, local, "the IN folder, under the project");
-                assert_eq!(row.direction, "download", "the client's folder only comes down");
-                let want = if d.folder_id.is_empty() { l.dest_folder() } else { d.folder_id.clone() };
-                assert_eq!(row.folder_id, want, "download.folder_id, or the link's own folder");
+                match sync.download.as_ref() {
+                    Some(d) => {
+                        let local = format!("{}/{}/{}", root, project, or(&d.local, portal::agent::UNNAMED_IN));
+                        let row = by_origin
+                            .get(&format!("portal:{}", l.id))
+                            .unwrap_or_else(|| panic!("no download watch for {} at {}", l.id, local));
+                        assert_eq!(row.local_path, local, "the Imports folder, under the project");
+                        assert_eq!(row.direction, "download", "the client's folder only comes down");
+                        let want = if d.folder_id.is_empty() { l.dest_folder() } else { d.folder_id.clone() };
+                        assert_eq!(row.folder_id, want, "drive.folder_id, or the link's own folder");
+                    }
+                    None => assert!(!by_origin.contains_key(&format!("portal:{}", l.id)), "Imports is off for {}", l.id),
+                }
                 if let Some(x) = sync.upload.as_ref() {
-                    let local = format!("{}/{}/{}", root, project, or(&x.local, &names.upload));
+                    let local = format!("{}/{}/{}", root, project, or(&x.local, portal::agent::UNNAMED_OUT));
                     let row = by_origin
                         .get(&format!("portal:{}#exports", l.id))
                         .unwrap_or_else(|| panic!("no upload watch for {} at {}", l.id, local));

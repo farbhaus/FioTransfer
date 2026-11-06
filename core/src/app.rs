@@ -658,6 +658,7 @@ impl App {
             cur.portal_url = s.portal_url.trim().trim_end_matches('/').to_string();
             cur.portal_root = s.portal_root.clone();
             cur.portal_enabled = s.portal_enabled;
+            cur.portal_include_existing = s.portal_include_existing;
             cur.portal_on_change = s.portal_on_change.clone();
             cur.portal_every_secs = s.portal_every_secs;
             cur.portal_email = s.portal_email.trim().to_string();
@@ -1183,6 +1184,13 @@ impl App {
         let rep = portal::agent::reconcile(self).await;
         self.refresh_portal_credential();
         *self.portal_last.lock().unwrap() = Some(rep.clone());
+        // One heartbeat after each reconcile that read Portal (every poller
+        // tick, changed or not, so "last seen" stays honest), while
+        // `portal_running` is still set so the two never overlap. Its answer is
+        // dropped: it can't change the report or fail the reconcile.
+        if rep.error.is_empty() {
+            let _ = portal::heartbeat::send(self, "reconcile").await;
+        }
         self.portal_running.store(false, Ordering::SeqCst);
         self.emit("portal", serde_json::to_value(&rep).unwrap_or(Value::Null));
         if rep.ensured + rep.removed > 0 {
@@ -1218,18 +1226,21 @@ impl App {
         Ok(self.portal_status())
     }
 
-    /// Stores the names a synced link's folders get when Portal doesn't name
-    /// them (IN and OUT by default). Each is one path segment, and they differ.
-    pub fn set_portal_folders(&self, download: &str, upload: &str) -> Result<portal::agent::PortalStatus, String> {
-        let (download, upload) = (download.trim().to_string(), upload.trim().to_string());
-        portal::agent::check_local(&download)?;
-        portal::agent::check_local(&upload)?;
-        if download == upload {
-            return Err("the IN and OUT folders need different names".to_string());
-        }
+    /// Whether a Portal folder that starts syncing takes what is already there.
+    /// Folders already syncing are left as they are.
+    pub fn set_portal_include_existing(&self, on: bool) -> Result<portal::agent::PortalStatus, String> {
+        let saved = config::update(|s| s.portal_include_existing = on).map_err(|e| e.to_string())?;
+        *self.settings.lock().unwrap() = saved;
+        Ok(self.portal_status())
+    }
+
+    /// Stores what Watch Folders calls a synced project's two lanes (Inbound and
+    /// Outbound by default). Labels only: no folder moves. An empty one is the
+    /// default again.
+    pub fn set_portal_labels(&self, inbound: &str, outbound: &str) -> Result<portal::agent::PortalStatus, String> {
         let saved = config::update(|s| {
-            s.portal_in_folder = download.clone();
-            s.portal_out_folder = upload.clone();
+            s.portal_in_label = inbound.trim().to_string();
+            s.portal_out_label = outbound.trim().to_string();
         })
         .map_err(|e| e.to_string())?;
         *self.settings.lock().unwrap() = saved;

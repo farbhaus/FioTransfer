@@ -862,7 +862,7 @@ fn an_invalid_local_refuses_the_mapping_and_creates_nothing() {
     )]);
     let rep = w.reconcile();
     assert!(rep.error.is_empty(), "{}", rep.error);
-    assert!(rep.skipped.iter().any(|s| s.reason.contains("the download folder")), "{:?}", rep.skipped);
+    assert!(rep.skipped.iter().any(|s| s.reason.contains("sync drive folder")), "{:?}", rep.skipped);
     // The exports side is still made: one bad mapping does not lose the other.
     assert_eq!(w.portal_watches().len(), 1);
     assert_eq!(w.portal_watches()[0].direction, "upload");
@@ -879,12 +879,11 @@ fn an_invalid_local_refuses_the_mapping_and_creates_nothing() {
     assert_eq!(made, want, "the refused name made no folder");
 }
 
-/// A link ticked "Sync to FioTransfer" and nothing else (`"sync": {}`, no
-/// turbosort) is a folder named after the link with IN inside; a link that is
-/// not ticked is left alone. Renaming IN in the settings moves the watch to the
-/// new folder on the next run, and the old folder stays on disk.
+/// A link ticked "Sync to FioTransfer" in Portal 2.2 and nothing else
+/// (`"sync": {}`, no turbosort) is a folder named after the link with IN
+/// inside; a link that is not ticked is left alone. Lane labels move no folder.
 #[test]
-fn a_ticked_link_is_named_after_itself_and_the_users_names_apply() {
+fn a_ticked_link_is_named_after_itself_and_its_lane_is_in() {
     let w = World::new();
     let mut ticked = sync_row("L1", "", json!({}));
     ticked["name"] = json!("Acme Spot 30s");
@@ -897,20 +896,21 @@ fn a_ticked_link_is_named_after_itself_and_the_users_names_apply() {
     assert_eq!(ws[0].local_path, project.join("IN").to_string_lossy().into_owned());
     assert_eq!(ws[0].direction, "download");
     assert_eq!(ws[0].folder_id, "F1", "the link's own folder");
-    assert!(!ws[0].ignore_remote, "IN takes what the client sent before the folder existed");
+    assert!(ws[0].ignore_remote, "by default, what the client sent before the folder existed stays on Frame.io");
 
     // The app's settings live on disk, as they do in the app.
     let root = w.root.to_string_lossy().into_owned();
     w.app.set_portal(&w.stub.base, "", &root, true).expect("settings saved");
-    w.app.set_portal_folders("Footage", "Exports").expect("the names are saved");
+
+    // Lane labels are words on screen: saved as typed, and no folder moves.
+    let paths = |w: &World| w.portal_watches().into_iter().map(|x| (x.id, x.local_path)).collect::<Vec<_>>();
+    let before = paths(&w);
+    w.app.set_portal_labels(" Rushes in ", "").expect("the labels are saved");
+    let s = w.app.settings();
+    assert_eq!((s.portal_in_label.as_str(), s.portal_out_label.as_str()), ("Rushes in", "Outbound"));
     let rep = w.reconcile();
-    assert!(rep.error.is_empty(), "{}", rep.error);
-    let ws = w.portal_watches();
-    assert_eq!(ws.len(), 1);
-    assert_eq!(ws[0].local_path, project.join("Footage").to_string_lossy().into_owned());
-    assert!(project.join("IN").is_dir(), "the old folder stays");
-    assert!(w.app.set_portal_folders("Same", "Same").is_err(), "IN and OUT differ");
-    assert!(w.app.set_portal_folders("a/b", "OUT").is_err(), "one segment each");
+    assert_eq!((rep.ensured, rep.removed), (0, 0), "a label is not a folder");
+    assert_eq!(paths(&w), before);
 }
 
 /// Portal's `state`: a link that expires or is revoked stops syncing at the
@@ -1049,6 +1049,84 @@ fn portals_edits_to_an_older_link_move_no_folder() {
     assert!(base.join("0_EXPORTS").is_dir());
 }
 
+/// "Include files already there", as for a watch the user makes: off, a folder
+/// that starts syncing leaves what is already there alone (on Frame.io and on
+/// disk); on, it takes it. Turning it on later changes no folder already syncing.
+#[test]
+fn files_already_there_are_taken_only_when_asked() {
+    let lanes = json!({"mode": "add_only", "drive": {"local": "1_DRIVE"}, "exports": {"local": "0_EXPORTS", "folder_id": "FEXPORTS"}});
+    let run = |include: bool| {
+        let w = World::new();
+        let root = w.root.to_string_lossy().into_owned();
+        w.app.set_portal(&w.stub.base, "", &root, true).expect("settings saved");
+        w.app.set_portal_include_existing(include).expect("saved");
+        assert_eq!(w.app.settings().portal_include_existing, include);
+        // A render already sitting where the Exports folder will be.
+        let out = w.root.join(MARKER).join("0_EXPORTS");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("SPOT_v01.mov"), b"render").unwrap();
+        w.stub.links(vec![sync_row("L1", MARKER, lanes.clone())]);
+        let rep = w.reconcile();
+        assert!(rep.error.is_empty() && rep.skipped.is_empty(), "{} {:?}", rep.error, rep.skipped);
+        let imports = row_of(&w, &w.root.join(MARKER).join("1_DRIVE").to_string_lossy());
+        let exports = row_of(&w, &out.to_string_lossy());
+        let known = w.hist.watch_files(&exports.id).unwrap();
+        (w, imports, known)
+    };
+
+    let (w, imports, known) = run(false);
+    assert!(imports.ignore_remote, "the client's earlier files stay on Frame.io");
+    assert_eq!(known.get("SPOT_v01.mov").map(|f| f.state.as_str()), Some("ignored"), "the render stays put");
+    // Turned on later: the folders already syncing keep what they started with.
+    w.app.set_portal_include_existing(true).expect("saved");
+    let rep = w.reconcile();
+    assert_eq!((rep.ensured, rep.removed), (0, 0), "{:?}", rep.skipped);
+    assert!(row_of(&w, &imports.local_path).ignore_remote);
+    drop(w);
+
+    let (_w, imports, known) = run(true);
+    assert!(!imports.ignore_remote, "the client's earlier files come down");
+    assert!(known.get("SPOT_v01.mov").is_none(), "the render goes up: {:?}", known);
+}
+
+/// A lane Portal doesn't send is off. Switching Imports off removes only the
+/// download watch (its folder stays on disk), and a link with Exports alone
+/// never downloads the client's folder.
+#[test]
+fn switching_imports_off_stops_only_the_download() {
+    let w = World::new();
+    let exports = json!({"mode": "add_only", "exports": {"local": "0_EXPORTS", "folder_id": "FEXPORTS"}});
+    let mut both = exports.clone();
+    both["drive"] = json!({"local": "1_DRIVE"});
+    let base = w.root.join(MARKER);
+
+    w.stub.links(vec![sync_row("L1", MARKER, both)]);
+    assert!(w.reconcile().error.is_empty());
+    assert_eq!(w.portal_watches().len(), 2);
+    let out = row_of(&w, &base.join("0_EXPORTS").to_string_lossy());
+
+    w.stub.links(vec![sync_row("L1", MARKER, exports.clone())]);
+    let rep = w.reconcile();
+    assert!(rep.error.is_empty() && rep.skipped.is_empty(), "{} {:?}", rep.error, rep.skipped);
+    assert_eq!((rep.ensured, rep.removed), (0, 1), "only the download watch goes");
+    let ws = w.portal_watches();
+    assert_eq!(ws.len(), 1, "{:?}", ws);
+    assert_eq!((ws[0].id.as_str(), ws[0].direction.as_str()), (out.id.as_str(), "upload"));
+    assert!(base.join("1_DRIVE").is_dir(), "unwatched, not deleted");
+
+    w.stub.links(vec![sync_row("L1", MARKER, exports.clone()), sync_row("L2", "OTHER", exports)]);
+    let rep = w.reconcile();
+    assert!(rep.error.is_empty() && rep.skipped.is_empty(), "{} {:?}", rep.error, rep.skipped);
+    let other: Vec<(String, String)> = w
+        .portal_watches()
+        .into_iter()
+        .filter(|x| x.origin.starts_with("portal:L2"))
+        .map(|x| (x.local_path, x.direction))
+        .collect();
+    assert_eq!(other, vec![(w.root.join("OTHER/0_EXPORTS").to_string_lossy().into_owned(), "upload".to_string())]);
+    assert_eq!(dirs_under(&w.root.join("OTHER")), BTreeSet::from(["0_EXPORTS".to_string()]), "no download folder made");
+}
+
 #[test]
 fn both_locals_the_same_refuses_the_second_mapping() {
     let w = World::new();
@@ -1061,7 +1139,7 @@ fn both_locals_the_same_refuses_the_second_mapping() {
     assert!(rep.error.is_empty(), "{}", rep.error);
     assert_eq!(w.portal_watches().len(), 1, "one folder cannot be both one-way");
     assert_eq!(w.portal_watches()[0].direction, "download", "the drive side is the one that was made");
-    assert!(rep.skipped.iter().any(|s| s.reason.contains("is the download folder")), "{:?}", rep.skipped);
+    assert!(rep.skipped.iter().any(|s| s.reason.contains("is the drive folder")), "{:?}", rep.skipped);
 }
 
 #[test]
@@ -1481,6 +1559,12 @@ fn a_new_settings_file_without_the_portal_fields_still_loads() {
     assert!(!s.portal_enabled);
     assert_eq!(s.portal_on_change, "overwrite");
     assert_eq!(s.portal_every_secs, 30);
-    assert!(s.portal_root.ends_with("Portal"));
-    assert_eq!((s.portal_in_folder.as_str(), s.portal_out_folder.as_str()), ("IN", "OUT"));
+    assert!(s.portal_root.ends_with("/Downloads"), "{}", s.portal_root);
+    assert!(!s.portal_include_existing);
+    // A file from 2.0.x with the retired IN/OUT names still loads.
+    let mut raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    raw["portal_in_folder"] = json!("Footage");
+    raw["portal_out_folder"] = json!("Exports");
+    let old: Settings = serde_json::from_value(raw).expect("retired keys are ignored");
+    assert_eq!(old.client_id, "abc");
 }

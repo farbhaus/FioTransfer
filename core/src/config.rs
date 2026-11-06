@@ -55,17 +55,22 @@ pub struct Settings {
     /// Portal's own destination paths are not used.
     #[serde(default = "default_portal_root")]
     pub portal_root: String,
-    /// The folder in each project that the link's uploads come down into, when
-    /// Portal doesn't name it.
-    #[serde(default = "default_portal_in_folder")]
-    pub portal_in_folder: String,
-    /// The folder in each project whose files go back up, when Portal doesn't
-    /// name it.
-    #[serde(default = "default_portal_out_folder")]
-    pub portal_out_folder: String,
+    /// What Watch Folders calls a synced project's download lane on screen.
+    /// The folder on disk is still `local`; this is only its label.
+    #[serde(default = "default_portal_in_label")]
+    pub portal_in_label: String,
+    /// The same for the upload lane.
+    #[serde(default = "default_portal_out_label")]
+    pub portal_out_label: String,
     /// Reconcile watch folders from Portal in the background (off by default).
     #[serde(default)]
     pub portal_enabled: bool,
+    /// A Portal folder that starts syncing also takes what is already there
+    /// (the client's files on Frame.io, files already in the local folder), as a
+    /// watch made with "Include files already there" does. Off by default, as
+    /// that checkbox is.
+    #[serde(default)]
+    pub portal_include_existing: bool,
     /// What a mirrored watch does with a local file that changed: overwrite or
     /// keep its earlier copy on Frame.io.
     #[serde(default = "default_portal_on_change")]
@@ -78,13 +83,19 @@ pub struct Settings {
     /// is never a setting, and the session cookie goes to the Keychain.
     #[serde(default)]
     pub portal_email: String,
+    /// This machine's id in Portal's list of connected clients: a uuid v4 made
+    /// on the first heartbeat and kept, so a restart is the same client. Not a
+    /// secret: it names the machine, not a person. Empty until then.
+    #[serde(default)]
+    pub portal_client_id: String,
 }
 
-/// Default for `Settings::portal_root`: ~/Portal.
-pub const PORTAL_ROOT_DIR: &str = "Portal";
-/// Defaults for `Settings::portal_in_folder` / `portal_out_folder`.
-pub const PORTAL_IN_FOLDER: &str = "IN";
-pub const PORTAL_OUT_FOLDER: &str = "OUT";
+/// Default for `Settings::portal_root`: ~/Downloads. Saved once Portal is set
+/// up, so changing it never moves an existing install's folders.
+pub const PORTAL_ROOT_DIR: &str = "Downloads";
+/// Defaults for `Settings::portal_in_label` / `portal_out_label`.
+pub const PORTAL_IN_LABEL: &str = "Inbound";
+pub const PORTAL_OUT_LABEL: &str = "Outbound";
 /// Default for `Settings::portal_every_secs`.
 pub const PORTAL_EVERY_SECS: i64 = 30;
 /// The shortest interval a poller may be asked for.
@@ -109,12 +120,14 @@ impl Default for Settings {
             last_folder_path: Vec::new(),
             portal_url: String::new(),
             portal_root: default_portal_root(),
-            portal_in_folder: default_portal_in_folder(),
-            portal_out_folder: default_portal_out_folder(),
+            portal_in_label: default_portal_in_label(),
+            portal_out_label: default_portal_out_label(),
             portal_enabled: false,
+            portal_include_existing: false,
             portal_on_change: PORTAL_ON_CHANGE.to_string(),
             portal_every_secs: PORTAL_EVERY_SECS,
             portal_email: String::new(),
+            portal_client_id: String::new(),
         }
     }
 }
@@ -125,7 +138,7 @@ impl Settings {
     }
 
     /// The local root Portal's project folders are mirrored under, with a
-    /// leading `~` expanded: `~/Portal` by default.
+    /// leading `~` expanded: `~/Downloads` by default.
     pub fn portal_root_path(&self) -> PathBuf {
         let root = if self.portal_root.trim().is_empty() { default_portal_root() } else { self.portal_root.clone() };
         expand_home(root.trim())
@@ -180,14 +193,16 @@ impl Settings {
         if self.portal_root.trim().is_empty() || self.portal_root.trim() == "/" {
             self.portal_root = d.portal_root;
         }
-        self.portal_in_folder = self.portal_in_folder.trim().to_string();
-        if self.portal_in_folder.is_empty() {
-            self.portal_in_folder = d.portal_in_folder;
+        self.portal_in_label = self.portal_in_label.trim().to_string();
+        if self.portal_in_label.is_empty() {
+            self.portal_in_label = d.portal_in_label;
         }
-        self.portal_out_folder = self.portal_out_folder.trim().to_string();
-        if self.portal_out_folder.is_empty() {
-            self.portal_out_folder = d.portal_out_folder;
+        self.portal_out_label = self.portal_out_label.trim().to_string();
+        if self.portal_out_label.is_empty() {
+            self.portal_out_label = d.portal_out_label;
         }
+        // Portal compares ids as strings: a stray space would be a second client.
+        self.portal_client_id = self.portal_client_id.trim().to_string();
         if self.portal_on_change != crate::history::watch::ON_CHANGE_KEEP {
             self.portal_on_change = PORTAL_ON_CHANGE.to_string();
         }
@@ -217,15 +232,15 @@ fn default_portal_every() -> i64 {
     PORTAL_EVERY_SECS
 }
 
-fn default_portal_in_folder() -> String {
-    PORTAL_IN_FOLDER.to_string()
+fn default_portal_in_label() -> String {
+    PORTAL_IN_LABEL.to_string()
 }
 
-fn default_portal_out_folder() -> String {
-    PORTAL_OUT_FOLDER.to_string()
+fn default_portal_out_label() -> String {
+    PORTAL_OUT_LABEL.to_string()
 }
 
-/// ~/Portal, where the synced links' folders go.
+/// ~/Downloads, where the synced links' folders go.
 pub fn default_portal_root() -> String {
     home_dir().join(PORTAL_ROOT_DIR).to_string_lossy().into_owned()
 }

@@ -1,17 +1,19 @@
 //! The reconciler: Portal links ticked "Sync to FioTransfer" become watch folders.
 //!
 //! Each synced link (one whose `folder` carries a `sync` object,
-//! [`crate::portal::Sync`]) gets a project folder, `portal_root/<project>`, named
-//! by [`project_folder`], holding up to two one-way folders owned by that link:
+//! [`crate::portal::Sync`]) gets a project folder, `portal_root/<turbosort>`
+//! ([`project_folder`]), holding up to two one-way folders owned by that link,
+//! one per lane Portal sends:
 //!
-//! * `<project>/IN` ← the link's Frame.io folder: `download`, what the client
-//!   sends;
-//! * `<project>/OUT` → `sync.upload.folder_id`: `upload`, what goes back. Only
-//!   when Portal names that folder.
+//! * Imports, `<project>/<drive.local>` ← `drive.folder_id` or the link's own
+//!   folder: `download`, what the client sends;
+//! * Exports, `<project>/<exports.local>` → `exports.folder_id`: `upload`, what
+//!   goes back.
 //!
-//! IN and OUT are the user's defaults ([`Names`]); Portal may name either.
-//! A link from an older Portal that carries only a `turbosort` name is one
-//! mirrored folder, `portal_root/<turbosort>`, as before.
+//! A lane Portal doesn't send is off. `local` is used as Portal sends it (its
+//! Settings → FioTransfer names them); `IN` and `OUT` only name a lane an
+//! unmigrated Portal 2.2 row left unnamed. A link with a `turbosort` and no `sync` is one mirrored
+//! folder, `portal_root/<turbosort>`.
 //!
 //! The direction is what keeps deletions from propagating: a `download` watch
 //! never uploads and an `upload` watch never downloads, and nothing in this
@@ -266,7 +268,7 @@ pub async fn preview(app: &App) -> Report {
     };
     rep.links_seen = links.len();
     let root = s.portal_root_path();
-    let targets = plan(&links, &root, &Names::of(&s), &s.portal_change_rule(), &mut rep);
+    let targets = plan(&links, &root, &s.portal_change_rule(), &mut rep);
     rep.ensured = targets.len();
     rep.planned = targets.iter().map(|t| t.local.clone()).collect();
     // Removals are knowable too: Portal-owned watches whose link is not in today's
@@ -296,7 +298,7 @@ fn apply(app: &App, links: &[UploadLink], rep: &mut Report) {
         rep.error = format!("can't create {}: {}", root.display(), e);
         return;
     }
-    let targets = plan(links, &root, &Names::of(&s), &s.portal_change_rule(), rep);
+    let targets = plan(links, &root, &s.portal_change_rule(), rep);
     let wanted: BTreeSet<String> = targets.iter().map(|t| t.origin.clone()).collect();
 
     // First: Portal-owned watches that Portal no longer asks for. A user's watch
@@ -351,12 +353,11 @@ fn apply(app: &App, links: &[UploadLink], rep: &mut Report) {
             continue;
         }
 
-        // An IN folder takes what is already in its Frame.io folder: a client
-        // may upload before the next reconcile, or while the app is closed, and
-        // a file already on disk with the same name and size is skipped anyway.
-        // OUT and an older Portal's mirror start from what is there, so nothing
-        // already on disk goes up again.
-        let existing = t.direction == DIR_DOWNLOAD;
+        // What is already there when a folder starts syncing (the client's
+        // files on Frame.io, files already in the local folder) is taken only
+        // when the user asked for it, as with a watch they make. The watcher
+        // reads it only for a side that is new.
+        let existing = s.portal_include_existing;
 
         match mine.first() {
             Some(w) => {
@@ -456,30 +457,24 @@ fn arrow(direction: &str) -> &'static str {
     }
 }
 
-/// The names a synced link's folders get when Portal doesn't name them:
-/// `Settings::portal_in_folder` and `portal_out_folder` (IN and OUT).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Names {
-    pub download: String,
-    pub upload: String,
-}
+/// The folder a lane gets when Portal sends no `local`, which only an
+/// unmigrated Portal 2.2 row does: 2.2's own defaults, the names its migration
+/// gives such a lane. Portal names every lane (its Settings → FioTransfer), so
+/// this is a fallback, not a setting.
+pub const UNNAMED_IN: &str = "IN";
+pub const UNNAMED_OUT: &str = "OUT";
 
-impl Names {
-    pub fn of(s: &crate::config::Settings) -> Names {
-        Names { download: s.portal_in_folder.clone(), upload: s.portal_out_folder.clone() }
-    }
-}
-
-/// The project's folder on disk: Portal's `sync.name`, else an older Portal's
-/// `turbosort`, else the link's own name made into one path segment. Portal's
-/// names are checked, not changed: a bad one is refused with its reason.
+/// The project's folder on disk: the link's `turbosort`, which Portal sends
+/// with every `sync`. A Portal 2.2 row not yet migrated has none, so its
+/// `sync.name` is next, then the link's own name made into one path segment.
+/// Portal's names are checked, not changed: a bad one is refused with its reason.
 pub fn project_folder(l: &UploadLink) -> String {
-    if let Some(name) = l.folder.sync.as_ref().map(|s| s.name.trim()).filter(|n| !n.is_empty()) {
-        return name.to_string();
-    }
     let marker = l.marker();
     if !marker.is_empty() {
         return marker;
+    }
+    if let Some(name) = l.folder.sync.as_ref().map(|s| s.name.trim()).filter(|n| !n.is_empty()) {
+        return name.to_string();
     }
     let name = segment_of(&l.label());
     if name.is_empty() {
@@ -509,10 +504,10 @@ fn segment_of(name: &str) -> String {
     s[..end].to_string()
 }
 
-/// What holds a project folder. An older Portal's mirror walks the whole
-/// folder, so it needs it alone; a synced link's watches sit in subfolders, so
-/// synced links may share one. Portal (2.2) names an unnamed link after its job
-/// folder, so a job's links meet there, as they do on Frame.io.
+/// What holds a project folder. A mirror walks the whole folder, so it needs it
+/// alone; a synced link's watches sit in subfolders, so synced links may share
+/// one. Portal suggests project names already in use, so several links can
+/// share a `turbosort`, as a job's links do on Frame.io.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Base {
     Mirror,
@@ -528,13 +523,12 @@ fn fold(path: &str) -> String {
 /// Turns Portal's rows into the watches they call for, reporting (not acting on)
 /// the ones that cannot be.
 ///
-/// A link ticked "Sync to FioTransfer" (it has a `sync`) plans a `download`
-/// watch at `root/<project>/<IN>`, and an `upload` watch at `root/<project>/<OUT>`
-/// when Portal names an upload folder, each with its own origin so either can
-/// be withdrawn alone. A link with only an older Portal's `turbosort` plans one
-/// mirrored watch at `root/<turbosort>`, as it always has. Any other link is
-/// left alone.
-fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut Report) -> Vec<Target> {
+/// A synced link (it has a `sync`) plans a `download` watch at
+/// `root/<project>/<drive.local>` when Imports is on, and an `upload` watch at
+/// `root/<project>/<exports.local>` when Exports is, each with its own origin so
+/// either can be withdrawn alone. A link with a `turbosort` and no `sync` plans
+/// one mirrored watch at `root/<turbosort>`. Any other link is left alone.
+fn plan(links: &[UploadLink], root: &Path, rule: &str, rep: &mut Report) -> Vec<Target> {
     let mut out: Vec<Target> = Vec::new();
     // Project folders and synced links' folders, by `fold`ed path.
     let mut bases: BTreeMap<String, Base> = BTreeMap::new();
@@ -654,43 +648,47 @@ fn plan(links: &[UploadLink], root: &Path, names: &Names, rule: &str, rep: &mut 
             if local.is_empty() { default.to_string() } else { local.to_string() }
         };
 
-        // The download side: the folder the client sends into. Portal may name
-        // its Frame.io folder and its local name; without them it is the link's
-        // own folder, into the user's IN folder.
-        let d = sync.download.clone().unwrap_or_default();
-        let down = SyncFolder { local: or_default(&d.local, &names.download), folder_id: d.folder_id };
-        let down_folder = if down.folder_id.is_empty() { folder.clone() } else { down.folder_id.clone() };
-        match mapping(&ctx, &mut mapped, "download", &down, &down_folder, DIR_DOWNLOAD, origin_of(&id), label.clone()) {
-            Ok(t) => out.extend(t),
-            Err(e) => rep.skipped.push(skip(e)),
+        // Imports: the folder the client sends into, from the lane's Frame.io
+        // folder or the link's own. Only when Portal sends the lane: a link
+        // with Imports switched off downloads nothing.
+        let down = sync.download.as_ref().map(|d| SyncFolder {
+            local: or_default(&d.local, UNNAMED_IN),
+            folder_id: if d.folder_id.is_empty() { folder.clone() } else { d.folder_id.clone() },
+        });
+        match &down {
+            Some(d) => match mapping(&ctx, &mut mapped, "drive", d, &d.folder_id, DIR_DOWNLOAD, origin_of(&id), label.clone()) {
+                Ok(t) => out.extend(t),
+                Err(e) => rep.skipped.push(skip(e)),
+            },
+            None => rep.notes.push(format!("link {}: sync names no drive folder, so nothing is downloaded for it", id)),
         }
 
-        // The upload side: only when Portal names its Frame.io folder, and
-        // never the download folder's.
+        // Exports: only when Portal names its Frame.io folder, and never the
+        // Imports folder's.
         if let Some(x) = sync.upload.as_ref() {
-            let up = SyncFolder { local: or_default(&x.local, &names.upload), folder_id: x.folder_id.clone() };
+            let up = SyncFolder { local: or_default(&x.local, UNNAMED_OUT), folder_id: x.folder_id.clone() };
             if up.folder_id.is_empty() {
                 rep.skipped.push(skip(
-                    "the upload folder names no folder_id: the link's own folder is already the download's".to_string(),
+                    "the sync exports folder names no folder_id".to_string(),
                 ));
                 continue;
             }
-            if fold(&up.local) == fold(&down.local) {
+            if down.as_ref().is_some_and(|d| fold(&up.local) == fold(&d.local)) {
                 rep.skipped.push(skip(format!(
-                    "the upload folder {:?} is the download folder: one folder cannot be both one-way",
+                    "the exports folder {:?} is the drive folder: one folder cannot be both one-way",
                     up.local
                 )));
                 continue;
             }
-            if up.folder_id == down_folder {
+            if down.as_ref().is_some_and(|d| up.folder_id == d.folder_id) {
                 rep.skipped.push(skip(format!(
-                    "the upload folder is Frame.io folder {} already, the download's: one folder cannot be both one-way",
+                    "the exports folder is Frame.io folder {} already, the drive's: one folder cannot be both one-way",
                     up.folder_id
                 )));
                 continue;
             }
             let up_label = format!("{} ({})", label, up.local);
-            match mapping(&ctx, &mut mapped, "upload", &up, &up.folder_id, DIR_UPLOAD, exports_origin_of(&id), up_label) {
+            match mapping(&ctx, &mut mapped, "exports", &up, &up.folder_id, DIR_UPLOAD, exports_origin_of(&id), up_label) {
                 Ok(t) => out.extend(t),
                 Err(e) => rep.skipped.push(skip(e)),
             }
@@ -723,7 +721,7 @@ fn mapping(
     label: String,
 ) -> Result<Option<Target>, String> {
     if let Err(e) = check_local(&m.local) {
-        return Err(format!("the {} folder: {}", side, e));
+        return Err(format!("the sync {} folder: {}", side, e));
     }
     let local = ctx.base.join(&m.local);
     // Belt and braces, as for the marker: the mapping must stay inside the
@@ -732,7 +730,7 @@ fn mapping(
         return Err(format!("{} is not directly under {}", local.display(), ctx.base.display()));
     }
     if folder.is_empty() {
-        return Err(format!("the {} folder names no Frame.io folder", side));
+        return Err(format!("the sync {} folder names no Frame.io folder", side));
     }
     let local = local.to_string_lossy().into_owned();
     let watch = (ctx.acct.to_string(), folder.to_string(), direction.to_string());
@@ -761,8 +759,20 @@ fn mapping(
 /// It reads the settings each time round, so a changed interval or a portal that
 /// was switched off takes effect within one interval. One reconcile at a time is
 /// `App::portal_reconcile`'s job, not this loop's.
+///
+/// Its first act is one heartbeat shortly after startup
+/// ([`crate::portal::heartbeat::STARTUP_DELAY`]), on its own task so a slow POST
+/// can't delay the first reconcile. Every tick after it sends one through the
+/// reconcile it runs.
 pub fn spawn(app: Arc<App>) {
     tokio::spawn(async move {
+        {
+            let early = Arc::clone(&app);
+            tokio::spawn(async move {
+                tokio::time::sleep(crate::portal::heartbeat::STARTUP_DELAY).await;
+                let _ = crate::portal::heartbeat::send(&early, "startup").await;
+            });
+        }
         loop {
             tokio::time::sleep(app.settings().portal_interval()).await;
             let s = app.settings();
@@ -811,18 +821,10 @@ mod tests {
         }
     }
 
-    fn names() -> Names {
-        Names { download: "IN".to_string(), upload: "OUT".to_string() }
-    }
-
     fn plan_of(links: &[UploadLink]) -> (Vec<Target>, Report) {
-        plan_named(links, &names())
-    }
-
-    fn plan_named(links: &[UploadLink], names: &Names) -> (Vec<Target>, Report) {
         let mut rep = Report::default();
         let root = Path::new("/root/Portal");
-        let t = plan(links, root, names, ON_CHANGE_OVERWRITE, &mut rep);
+        let t = plan(links, root, ON_CHANGE_OVERWRITE, &mut rep);
         (t, rep)
     }
 
@@ -909,7 +911,7 @@ mod tests {
     #[test]
     fn the_change_rule_is_the_one_asked_for() {
         let mut rep = Report::default();
-        let t = plan(&[link("L1", "X")], Path::new("/r"), &names(), ON_CHANGE_KEEP, &mut rep);
+        let t = plan(&[link("L1", "X")], Path::new("/r"), ON_CHANGE_KEEP, &mut rep);
         assert_eq!(t[0].rule, ON_CHANGE_KEEP);
         assert_eq!(ON_CHANGE_KEEP, "keep");
     }
@@ -986,14 +988,14 @@ mod tests {
             let (t, rep) = plan_of(&[l]);
             assert_eq!(locals(&t), vec!["/root/Portal/Rakete/0_EXPORTS"], "{:?} made a drive watch", bad);
             assert_eq!(rep.skipped.len(), 1, "{:?} said nothing: {:?}", bad, rep.skipped);
-            assert!(rep.skipped[0].reason.contains("the download folder"), "{}", rep.skipped[0].reason);
+            assert!(rep.skipped[0].reason.contains("sync drive folder"), "{}", rep.skipped[0].reason);
             assert_eq!(t[0].direction, DIR_UPLOAD);
         }
         // …and the exports side is checked by the same rule.
         let l = sync_link("L1", "Rakete", side("1_DRIVE", ""), side("../out", "FX"));
         let (t, rep) = plan_of(&[l]);
         assert_eq!(locals(&t), vec!["/root/Portal/Rakete/1_DRIVE"]);
-        assert!(rep.skipped[0].reason.contains("the upload folder"), "{}", rep.skipped[0].reason);
+        assert!(rep.skipped[0].reason.contains("sync exports folder"), "{}", rep.skipped[0].reason);
     }
 
     #[test]
@@ -1002,7 +1004,7 @@ mod tests {
         let (t, rep) = plan_of(&[l]);
         assert_eq!(locals(&t), vec!["/root/Portal/Rakete/SAME"]);
         assert_eq!(t[0].direction, DIR_DOWNLOAD);
-        assert!(rep.skipped[0].reason.contains("is the download folder"), "{}", rep.skipped[0].reason);
+        assert!(rep.skipped[0].reason.contains("is the drive folder"), "{}", rep.skipped[0].reason);
     }
 
     #[test]
@@ -1039,23 +1041,63 @@ mod tests {
     }
 
     #[test]
-    fn a_sync_link_without_a_download_side_still_gets_its_in_folder() {
+    fn a_sync_link_without_a_drive_side_says_so_and_makes_only_what_it_can() {
         let l = sync_link("L1", "Rakete", None, side("0_EXPORTS", "FX"));
         let (t, rep) = plan_of(&[l]);
-        assert!(rep.skipped.is_empty() && rep.notes.is_empty(), "{:?} {:?}", rep.skipped, rep.notes);
-        assert_eq!(locals(&t), vec!["/root/Portal/Rakete/IN", "/root/Portal/Rakete/0_EXPORTS"]);
-        assert_eq!(t[0].direction, DIR_DOWNLOAD);
-        assert_eq!(t[0].folder, "FL1", "the link's own folder");
-        assert_eq!(t[1].direction, DIR_UPLOAD);
+        assert_eq!(locals(&t), vec!["/root/Portal/Rakete/0_EXPORTS"]);
+        assert_eq!(t[0].direction, DIR_UPLOAD);
+        assert!(rep.notes.iter().any(|n| n.contains("no drive folder")), "{:?}", rep.notes);
     }
 
-    // ---------- the neutral contract ----------
+    #[test]
+    fn exports_may_go_to_the_links_own_folder_when_imports_is_off() {
+        let l = sync_link("L1", "Rakete", None, side("0_EXPORTS", "FL1"));
+        let (t, rep) = plan_of(&[l]);
+        assert!(rep.skipped.is_empty(), "{:?}", rep.skipped);
+        assert_eq!((t[0].folder.as_str(), t[0].direction.as_str()), ("FL1", DIR_UPLOAD));
+    }
 
-    /// A link ticked "Sync to FioTransfer": `"sync": {}` and nothing else.
+    /// A row of `GET /api/upload-links` in the contract's shape, as Portal
+    /// sends it from this release on.
+    fn contract_row(id: &str, sync: serde_json::Value) -> UploadLink {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": "Acme spot", "state": "ok", "turbosort": "ACME_SPOT",
+            "folder": {"type": "frameio", "account_id": "A1", "folder_id": "F-LINK", "turbosort": "ACME_SPOT", "sync": sync},
+            "send_link": null, "return_link": null
+        }))
+        .expect("the contract's row")
+    }
+
+    #[test]
+    fn a_contract_row_maps_each_lane_it_sends_and_nothing_else() {
+        let both = serde_json::json!({"mode": "add_only", "drive": {"local": "1_DRIVE"}, "exports": {"local": "0_EXPORTS", "folder_id": "FX"}});
+        let (t, rep) = plan_of(&[contract_row("L1", both)]);
+        assert!(rep.skipped.is_empty() && rep.notes.is_empty(), "{:?} {:?}", rep.skipped, rep.notes);
+        assert_eq!(locals(&t), vec!["/root/Portal/ACME_SPOT/1_DRIVE", "/root/Portal/ACME_SPOT/0_EXPORTS"]);
+        assert_eq!((t[0].folder.as_str(), t[0].direction.as_str()), ("F-LINK", DIR_DOWNLOAD));
+        assert_eq!((t[1].folder.as_str(), t[1].direction.as_str()), ("FX", DIR_UPLOAD));
+
+        let imports = serde_json::json!({"mode": "add_only", "drive": {"local": "Rushes", "folder_id": "FD"}});
+        let (t, _) = plan_of(&[contract_row("L1", imports)]);
+        assert_eq!(locals(&t), vec!["/root/Portal/ACME_SPOT/Rushes"]);
+        assert_eq!(t[0].folder, "FD");
+
+        let exports = serde_json::json!({"mode": "add_only", "exports": {"local": "0_EXPORTS", "folder_id": "FX"}});
+        let (t, _) = plan_of(&[contract_row("L1", exports)]);
+        assert_eq!(locals(&t), vec!["/root/Portal/ACME_SPOT/0_EXPORTS"], "Imports is off: nothing comes down");
+    }
+
+    // ---------- Portal 2.2's rows, not yet migrated ----------
+
+    /// A link ticked "Sync to FioTransfer" in Portal 2.2: `"sync": {}`, read
+    /// as its migration rewrites it (a download side with no names).
     fn ticked(id: &str, name: &str) -> UploadLink {
         let mut l = link(id, "");
         l.name = name.to_string();
-        l.folder = crate::portal::Folder { sync: Some(crate::portal::Sync::default()), ..Default::default() };
+        l.folder = crate::portal::Folder {
+            sync: Some(crate::portal::Sync { download: side("", ""), ..Default::default() }),
+            ..Default::default()
+        };
         l
     }
 
@@ -1077,28 +1119,30 @@ mod tests {
     }
 
     #[test]
-    fn the_users_names_are_the_defaults_and_portals_own_win() {
-        let mine = Names { download: "Footage".to_string(), upload: "Exports".to_string() };
+    fn an_unnamed_lane_is_in_or_out_and_portals_name_wins() {
         let mut l = ticked("L1", "Acme");
-        l.folder.sync = Some(crate::portal::Sync { upload: side("", "FX"), ..Default::default() });
-        let (t, _) = plan_named(&[l.clone()], &mine);
-        assert_eq!(locals(&t), vec!["/root/Portal/Acme/Footage", "/root/Portal/Acme/Exports"]);
-        assert_eq!(t[1].label, "Acme (Exports)");
+        l.folder.sync = Some(crate::portal::Sync { download: side("", ""), upload: side("", "FX"), ..Default::default() });
+        let (t, _) = plan_of(&[l.clone()]);
+        assert_eq!(locals(&t), vec!["/root/Portal/Acme/IN", "/root/Portal/Acme/OUT"]);
+        assert_eq!(t[1].label, "Acme (OUT)");
 
         l.folder.sync = Some(crate::portal::Sync { download: side("RUSHES", ""), upload: side("", "FX"), ..Default::default() });
-        let (t, _) = plan_named(&[l], &mine);
-        assert_eq!(locals(&t), vec!["/root/Portal/Acme/RUSHES", "/root/Portal/Acme/Exports"], "Portal's name wins");
+        let (t, _) = plan_of(&[l]);
+        assert_eq!(locals(&t), vec!["/root/Portal/Acme/RUSHES", "/root/Portal/Acme/OUT"], "Portal's name wins");
     }
 
     #[test]
-    fn sync_name_names_the_project_and_wins_over_turbosort() {
-        let mut l = sync_link("L1", "Rakete", None, None);
+    fn turbosort_names_the_project_and_sync_name_only_stands_in_for_it() {
+        let mut l = sync_link("L1", "Rakete", side("", ""), None);
         l.folder.sync.as_mut().unwrap().name = "ACME_2026".to_string();
+        assert_eq!(project_folder(&l), "Rakete");
+        let (t, _) = plan_of(&[l.clone()]);
+        assert_eq!(locals(&t), vec!["/root/Portal/Rakete/IN"]);
+        // A 2.2 row has no `turbosort`: its `sync.name` names the project.
+        l.turbosort.clear();
         assert_eq!(project_folder(&l), "ACME_2026");
-        let (t, _) = plan_of(&[l]);
-        assert_eq!(locals(&t), vec!["/root/Portal/ACME_2026/IN"]);
         // Portal's names are checked, not rewritten.
-        let mut bad = sync_link("L2", "", None, None);
+        let mut bad = sync_link("L2", "", side("", ""), None);
         bad.folder.sync.as_mut().unwrap().name = "../etc".to_string();
         let (t, rep) = plan_of(&[bad]);
         assert!(t.is_empty());
@@ -1205,7 +1249,7 @@ mod tests {
         // down would go straight back up.
         let (t, rep) = plan_of(&[sync_link("L1", "Rakete", side("Rushes", "FD"), side("RUSHES", "FX"))]);
         assert_eq!(locals(&t), vec!["/root/Portal/Rakete/Rushes"]);
-        assert!(rep.skipped[0].reason.contains("is the download folder"), "{}", rep.skipped[0].reason);
+        assert!(rep.skipped[0].reason.contains("is the drive folder"), "{}", rep.skipped[0].reason);
         // Two links in one project folder.
         let (t, rep) = plan_of(&[
             row_2_2("L1", "F-RUSHES", "Rushes", "F-RENDER", "RENDER"),

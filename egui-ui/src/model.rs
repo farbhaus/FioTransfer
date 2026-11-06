@@ -197,9 +197,9 @@ pub enum Request {
     /// The local folder Portal's markers are mirrored under
     /// (`Settings::portal_root`).
     SetPortalRoot(String),
-    /// What a synced link's IN and OUT folders are called when Portal doesn't
-    /// name them (`Settings::portal_in_folder` / `portal_out_folder`).
-    SetPortalFolders { download: String, upload: String },
+    /// What Watch Folders calls a synced project's two lanes
+    /// (`Settings::portal_in_label` / `portal_out_label`).
+    SetPortalLabels { inbound: String, outbound: String },
     /// Store the bearer token in the keychain. The token is a [`Secret`], so no
     /// `{:?}` of this enum can print it, and it is never a setting.
     SetPortalToken(Secret),
@@ -219,6 +219,9 @@ pub enum Request {
     SignOutPortal,
     /// Turn Portal's background poller on or off (`Settings::portal_enabled`).
     SetPortalEnabled(bool),
+    /// Whether a Portal folder that starts syncing takes what is already there
+    /// (`Settings::portal_include_existing`).
+    SetPortalIncludeExisting(bool),
     /// Reconcile the watch folders with Portal now (`App::portal_reconcile`).
     PortalReconcile,
 
@@ -583,10 +586,9 @@ pub struct PortalUi {
     /// The local folder being typed, or `None` while the field shows
     /// `settings.portal_root`.
     pub root_draft: Option<String>,
-    /// The IN and OUT names being typed, or `None` while the fields show the
+    /// The lane labels being typed, or `None` while the fields show the
     /// settings.
-    pub folders_draft: Option<(String, String)>,
-    pub folders_error: Option<String>,
+    pub labels_draft: Option<(String, String)>,
     /// The token being typed. It never becomes a setting: Save hands it to the
     /// keychain and the shell empties this.
     pub token_draft: String,

@@ -1,30 +1,37 @@
 # Portal
 
-Tick **Sync to FioTransfer** on a Portal upload link, and FioTransfer gives that link a project folder on
-your disk. What the client uploads comes down into it. If the link has a return folder, what you put there
-goes back up. Portal only says which links and which Frame.io folders; the files move between FioTransfer
-and Frame.io.
+Sync a Portal upload link to FioTransfer, and FioTransfer gives it a project folder on your disk with up to
+two folders in it, one per lane switched on in Portal. **Imports**: what the client uploads comes down.
+**Exports**: what you put there goes back up. Portal only says which links and which Frame.io folders; the
+files move between FioTransfer and Frame.io.
 
 ```
-~/Portal/
-  Acme Spot 30s/      ← named after the link (an unnamed link: its job folder on Frame.io)
-    RUSHES/           ← what the client uploads (Frame.io → disk)
-    RENDER/           ← what you send back (disk → Frame.io), only if the link has a return folder
+~/Downloads/
+  ACME_SPOT/          ← the link's project folder (Portal's project name)
+    1_DRIVE/          ← Imports: Frame.io → disk
+    0_EXPORTS/        ← Exports: disk → Frame.io
 ```
 
-Portal names the two folders after their Frame.io folders. Where it doesn't, they're IN and OUT.
+Both names come from Portal: its **Settings → FioTransfer** sets the defaults, and a lane follows its
+Frame.io folder's name unless you type one on the link. FioTransfer uses them as sent.
 
 ## Rules
 
-- **Only ticked links.** A link without Sync to FioTransfer is left alone.
-- **IN takes everything the client sent**, including files uploaded before the folder existed. A file
-  already on disk with the same name and size is skipped.
-- **OUT sends what you add to it** after the folder exists.
-- **Nothing is ever deleted**, on either side. Each folder moves files one way only.
-- **When a link closes or is unticked**, its folders stop syncing and stay on disk with everything in them.
-- **Renaming** a link, or the IN/OUT names, starts a new folder; the old one stays.
-- **Links of one job share its folder**, each with its own IN. Links that share a return folder share
-  one OUT.
+- **Only synced links.** A link without a sync is left alone.
+- **A lane switched off is off.** No Imports, nothing comes down; no Exports, nothing goes up.
+- **Files already there** when a folder starts syncing (the client's earlier uploads, files already in the
+  local folder) are left alone, unless **Include files already there** is on, as for any watch folder.
+  Imports skips a file already on disk with the same name and size.
+- **Deletions don't sync.** Deleting a file on one side never deletes it on the other. Each folder moves
+  files one way only.
+- **A re-render replaces its earlier copy.** When a file in Exports changes, the new version uploads and the
+  copy FioTransfer uploaded before is deleted from Frame.io once the new one is confirmed. A same-named file
+  put there some other way stays.
+- **When a link closes, or a lane is switched off**, its folder stops syncing and stays on disk with
+  everything in it.
+- **Renaming** a project or a lane starts a new folder; the old one stays.
+- **Links can share a project folder**, each with its own folders inside. Links that send the same Exports
+  folder to the same Frame.io folder share one watch.
 - **Edit links in Portal.** Portal's folders are read-only in Watch Folders. Pausing one is fine.
 
 ## Setting it up
@@ -36,48 +43,72 @@ Settings → **Portal**:
 | **Server URL** | Your Portal, e.g. `https://portal.example.com`. |
 | **Sign in** | Your Portal admin email and password (and the six-digit code if the account has one). Only Portal's session cookie is kept, in the Keychain; the password is not stored. |
 | **Access token** | Instead of signing in: the deployment's `PORTAL_API_TOKEN`, for a machine without a person at it. A stored token wins over a session. |
-| **Local folder** | Where project folders go. Default `~/Portal`. |
-| **Folder names** | What IN and OUT are called in each project. Default `IN` and `OUT`. Portal can name them per link. |
+| **Local folder** | Where project folders go. Default `~/Downloads`. |
+| **Include files already there** | A project folder that starts syncing also takes what's already there. Off by default. Folders already syncing aren't affected. |
+| **Lane labels** | What Watch Folders calls each project's two lanes. Default `Inbound` and `Outbound`. Only the words on screen; no folder moves. |
 | **Enabled** | Checks Portal every 30 s. Off by default: nothing is contacted until you turn it on. |
 
 **Reconcile now** checks at once. The status line says what the last check did, or why it failed.
 
 ## What Portal sends
 
-FioTransfer reads `GET /api/upload-links`. A synced link carries a `sync` object inside its `folder`.
-Its presence is the tick; every field in it is optional:
+FioTransfer reads `GET /api/upload-links`. A synced link carries a `turbosort` and a `sync` object inside its
+`folder`:
 
 ```json
 {
-  "id": "…", "name": "Acme Spot 30s", "state": "ok",
+  "id": "…", "name": "Acme Spot 30s", "state": "ok", "turbosort": "ACME_SPOT",
   "folder": {
-    "account_id": "…", "folder_id": "…",
+    "account_id": "…", "folder_id": "…", "turbosort": "ACME_SPOT",
     "sync": {
-      "name": "ACME_SPOT_30",
-      "download": {"local": "IN"},
-      "upload":   {"local": "OUT", "folder_id": "…"}
+      "mode": "add_only",
+      "drive":   {"local": "1_DRIVE"},
+      "exports": {"local": "0_EXPORTS", "folder_id": "…"}
     }
   }
 }
 ```
 
-| Field | Meaning | Default |
+| Field | Meaning | Absent |
 | --- | --- | --- |
-| `sync` | The link is synced. `"sync": {}` is enough. | not synced |
-| `sync.name` | The project folder's name on disk | the link's `name` |
-| `sync.download.folder_id` | The Frame.io folder IN comes from | the link's `folder_id` |
-| `sync.download.local` | IN's name | the user's IN name |
-| `sync.upload.folder_id` | The Frame.io folder OUT goes to. Without it there is no OUT. | none |
-| `sync.upload.local` | OUT's name | the user's OUT name |
+| `turbosort` | The project folder, `~/Downloads/<turbosort>` | (always sent with `sync`) |
+| `sync.mode` | `add_only`: nothing is deleted at either end | `add_only` |
+| `sync.drive` | Imports: Frame.io → `<project>/<local>` | Imports is off |
+| `sync.drive.folder_id` | Where Imports come from | the link's `folder_id` |
+| `sync.exports` | Exports: `<project>/<local>` → Frame.io | Exports is off |
+| `sync.exports.folder_id` | Where Exports go | (always sent with `exports`) |
+| `*.local` | The lane's folder name, used as sent | (always sent) |
 | `state` | `ok` while the link works; `expired` or `revoked` stop its folders | live |
 
-Folder names are one path segment: no `/`, `\`, `%`, control characters, `.` or `..`. A link's own name is
-cleaned up to fit (`/` becomes `-`); a name Portal sets is refused with a reason instead. Names that differ
-only in case are one folder. Two links naming one IN or OUT folder for different Frame.io folders: the lower
-id gets it, the other is skipped with a reason.
+Folder names are one path segment: no `/`, `\`, `%`, control characters, `.` or `..`; a bad one is refused
+with a reason. Names that differ only in case are one folder. Two links naming one folder for different
+Frame.io folders: the lower id gets it, the other is skipped with a reason.
 
-Older Portals that call the sides `drive` and `exports` are still read. A link with only a `turbosort`
-value and no `sync` is one two-way folder, `~/Portal/<turbosort>`, as before; it needs that folder to itself.
+Rows saved by Portal 2.2 or 2.3 (`download`, `upload`, `sync.name`, or `"sync": {}`) are read the way
+Portal's migration rewrites them: they always have Imports, `sync.name` or the link's name is the project
+folder, and an unnamed lane is `IN` or `OUT`. A link with a `turbosort` and no `sync`
+is one two-way folder, `~/Downloads/<turbosort>`; it needs that folder to itself.
+
+## What FioTransfer tells Portal
+
+After every check, and 5 s after launch, FioTransfer posts one heartbeat so Portal can show which machines
+are connected and which folders each one keeps in step. It's the only thing the app writes to Portal, and
+it changes nothing on either side:
+
+```json
+POST /api/live-work/heartbeat
+{
+  "client_id": "0f0c1c1e-…", "name": "studio-mac", "app_version": "2.1.0", "platform": "macos-aarch64",
+  "lanes": [{"link_id": "L1", "project": "ACME_SPOT", "local": "1_DRIVE", "direction": "download",
+             "folder_id": "…", "path": "/Users/you/Downloads/ACME_SPOT/1_DRIVE"}]
+}
+```
+
+- One lane per folder FioTransfer actually made for Portal (a skipped link has none; your own watch
+  folders are never reported).
+- `client_id` is this machine, made once and kept in `settings.json` (`portal_client_id`).
+- Not sent while Portal is off, has no address or no credential. A failure is silent and isn't retried until
+  the next check; `FIO_TRACE=1` prints `[portal heartbeat] …` lines on stderr.
 
 ## From a terminal
 
@@ -100,8 +131,8 @@ kept in step: 1
 removed: 0
 skipped 8177b73e-… "../etc": the folder name "../etc" contains '/': one path segment only
 watch folders:
-  /Users/you/Portal/Acme Spot 30s/IN ← acct-1/folder-1
-  /Users/you/Portal/Acme Spot 30s/OUT → acct-1/folder-2
+  /Users/you/Downloads/ACME_SPOT/1_DRIVE ← acct-1/folder-1
+  /Users/you/Downloads/ACME_SPOT/0_EXPORTS → acct-1/folder-2
 ```
 
 Where `fio` is: `/usr/bin/fio` (Debian package), `FioTransfer.app/Contents/MacOS/fio` (macOS),

@@ -7,8 +7,9 @@
 //! show in Finder, remove). The empty state is "No watch folders".
 //!
 //! A project synced from Portal is one job, not two rows: its name on the title
-//! line, marked Portal, with a line under it for each of its folders, named as
-//! on disk (IN and OUT unless renamed). The title line also carries `Open in
+//! line, marked Portal, with a line under it for each of its lanes, named by the
+//! user's lane labels (Inbound and Outbound unless renamed in Settings) over the
+//! folder's path. The title line also carries `Open in
 //! Portal`, which opens the project's link on the Portal server. A watch the
 //! user made is still one row of its own, drawn exactly as it was.
 //!
@@ -214,6 +215,10 @@ pub fn show_with_actions(ui: &mut egui::Ui, state: &mut UiState) -> Option<Actio
     // the rows stay indices and the address stays one value for the screen.
     let home = state.home.clone();
     let portal_url = state.settings.portal_url.clone();
+    let labels = LaneLabels {
+        inbound: state.settings.portal_in_label.clone(),
+        outbound: state.settings.portal_out_label.clone(),
+    };
     for block in watch_blocks(&state.watches) {
         match &block.duplex_id {
             Some(_) => duplex_block(
@@ -222,6 +227,7 @@ pub fn show_with_actions(ui: &mut egui::Ui, state: &mut UiState) -> Option<Actio
                 &mut state.watches,
                 &home,
                 &portal_url,
+                &labels,
                 &columns,
                 &mut action,
             ),
@@ -379,6 +385,25 @@ fn watch_row(
     }
 }
 
+/// What a synced project's lanes are called on screen
+/// (`Settings::portal_in_label` / `portal_out_label`).
+struct LaneLabels {
+    inbound: String,
+    outbound: String,
+}
+
+impl LaneLabels {
+    /// The lane's label, or the folder's own name if the label is empty.
+    fn of(&self, lane: Lane, local: &str) -> String {
+        let label = match lane {
+            Lane::Inbound => self.inbound.trim(),
+            Lane::Outbound => self.outbound.trim(),
+            Lane::None => "",
+        };
+        if label.is_empty() { base_name(local) } else { label.to_string() }
+    }
+}
+
 /// One Portal-managed project as one job: the title line, then a line for each
 /// sync lane under it.
 ///
@@ -392,6 +417,7 @@ fn duplex_block(
     watches: &mut [WatchRow],
     home: &str,
     portal_url: &str,
+    labels: &LaneLabels,
     columns: &Columns,
     action: &mut Option<Action>,
 ) {
@@ -410,7 +436,8 @@ fn duplex_block(
 
     for lane in [Lane::Inbound, Lane::Outbound] {
         if let Some(index) = rows.iter().copied().find(|&index| watches[index].lane == lane) {
-            sync_lane_row(ui, index, &mut watches[index], home, columns, action);
+            let label = labels.of(lane, &watches[index].local);
+            sync_lane_row(ui, index, &mut watches[index], &label, home, columns, action);
         }
     }
 }
@@ -478,17 +505,18 @@ fn job_head(
     head.on_hover_text(PORTAL_SENTENCE);
 }
 
-/// One folder of a job: its name and path, the Frame.io side, and its own
-/// state — the same cells a row draws, in the same fonts and the same 56 px row.
+/// One lane of a job: its label (`lane`) over its folder's path, the Frame.io
+/// side, and its own state — the same cells a row draws, in the same fonts and
+/// the same 56 px row.
 fn sync_lane_row(
     ui: &mut egui::Ui,
     index: usize,
     watch: &mut WatchRow,
+    lane: &str,
     home: &str,
     columns: &Columns,
     action: &mut Option<Action>,
 ) {
-    let lane = base_name(&watch.local);
     let path = short_path(&watch.local, home);
 
     strip(ui, ROW_HEIGHT, true, |ui| {
@@ -499,7 +527,7 @@ fn sync_lane_row(
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 ui.add(theme::truncating(
-                    RichText::new(&lane)
+                    RichText::new(lane)
                         .font(theme::body())
                         .color(if watch.enabled { theme::TEXT } else { theme::TEXT_2 })
                         .strong(),
@@ -641,11 +669,6 @@ pub const EDITOR_LABEL_NAME: &str = "Label";
 pub const EDITOR_LABEL_DIRECTION: &str = "Direction";
 pub const EDITOR_LABEL_ON_CHANGE: &str = "On change";
 pub const EDITOR_INCLUDE: &str = "Include files already there";
-/// What the checkbox means, under it: the core reads it on every save, and only a
-/// side that is new has anything already there to include.
-pub const EDITOR_INCLUDE_HELP: &str =
-    "Ticked, what is already in the folder is transferred too. Unticked, only what \
-     appears after the save is.";
 
 /// The modal's id, so egui keeps its place and the backdrop across frames.
 const EDITOR_ID: &str = "fiotransfer-egui.watch.editor";
@@ -808,22 +831,12 @@ fn editor_dialog(ctx: &egui::Context, editor: &mut WatchEditor, covered: bool) -
                             segmented(ui, &ON_CHANGES, &mut editor.on_change);
                         });
 
-                        let boxed = ui.add(Checkbox::new(
+                        ui.add(Checkbox::new(
                             &mut editor.include_existing,
                             RichText::new(EDITOR_INCLUDE)
                                 .font(theme::body())
                                 .color(theme::TEXT_2),
                         ));
-                        boxed.on_hover_text(EDITOR_INCLUDE_HELP);
-                        ui.add_space(theme::space::S);
-                        ui.add(
-                            Label::new(
-                                RichText::new(EDITOR_INCLUDE_HELP)
-                                    .font(theme::detail())
-                                    .color(theme::TEXT_3),
-                            )
-                            .wrap(),
-                        );
                     });
 
                     // Why Save is off, in the app's own words for it: under the
@@ -2200,15 +2213,15 @@ mod tests {
 
     // ---------- a duplex is one job with two sync lanes ----------
 
-    /// The project's name on the title line, and a line per folder under it,
-    /// named as the folder is on disk.
+    /// The project's name on the title line, and a line per lane under it,
+    /// named by the lane labels over the folder's path.
     #[test]
     fn a_duplex_draws_one_job_with_both_folders() {
         let harness = screen_harness(state_with(luc()));
 
         let title = job_title(&harness, "LUC");
-        let inbound = harness.get_by_label("IN");
-        let outbound = harness.get_by_label("OUT");
+        let inbound = harness.get_by_label("Inbound");
+        let outbound = harness.get_by_label("Outbound");
 
         // Under the title, inbound first, one row apart, the rows on the pitch
         // the list has always used.
@@ -2240,7 +2253,7 @@ mod tests {
         assert_eq!(harness.get_all_by_label("Show in Finder").count(), 2);
     }
 
-    /// A link with no upload folder: its IN folder and nothing else. A link
+    /// A link with no upload lane: its inbound lane and nothing else. A link
     /// without one is the normal case, not something missing.
     #[test]
     fn a_project_with_only_in_shows_only_in() {
@@ -2255,8 +2268,8 @@ mod tests {
         )]));
 
         let title = job_title(&harness, "LUC");
-        let inbound = harness.get_by_label("IN");
-        assert!(harness.query_by_label("OUT").is_none());
+        let inbound = harness.get_by_label("Inbound");
+        assert!(harness.query_by_label("Outbound").is_none());
         assert!((inbound.rect().center().y - title.rect().center().y - ROW_HEIGHT).abs() < 2.0);
         assert_eq!(harness.get_all_by_label("Remove").count(), 1);
         assert_eq!(harness.get_all_by_label("Pause").count(), 1);
@@ -2275,9 +2288,9 @@ mod tests {
             Lane::Outbound,
         )]));
 
-        harness.get_by_label("OUT");
+        harness.get_by_label("Outbound");
         harness.get_by_label("Paused");
-        assert!(harness.query_by_label("IN").is_none());
+        assert!(harness.query_by_label("Inbound").is_none());
     }
 
     /// A watch the user made keeps the row it has always had: no title, no lane
@@ -2310,6 +2323,28 @@ mod tests {
         assert_eq!(harness.get_all_by_label(PORTAL_MARKER).count(), 1);
     }
 
+    /// The lane labels are the user's: whatever Settings says, over the same
+    /// paths; an empty one shows the folder's own name.
+    #[test]
+    fn the_lane_labels_are_the_users() {
+        let mut state = state_with(luc());
+        state.settings.portal_in_label = "Rushes in".to_string();
+        state.settings.portal_out_label = "Renders out".to_string();
+        let harness = screen_harness(state);
+        let inbound = harness.get_by_label("Rushes in");
+        let outbound = harness.get_by_label("Renders out");
+        assert!(outbound.rect().center().y > inbound.rect().center().y, "inbound first");
+        assert!(harness.query_by_label("Inbound").is_none());
+        harness.get_by_label("~/Portal/LUC/IN");
+        harness.get_by_label("~/Portal/LUC/OUT");
+
+        let mut state = state_with(luc());
+        state.settings.portal_in_label = " ".to_string();
+        let harness = screen_harness(state);
+        harness.get_by_label("IN");
+        harness.get_by_label("Outbound");
+    }
+
     /// Two duplexes in one list: each is one block, and the blocks are in label
     /// order whatever order the records arrived in — the list of a portal listing
     /// is not the order a person reads.
@@ -2329,9 +2364,9 @@ mod tests {
 
         // Each block holds its own two lanes, in its own place: four lanes, two
         // titles, and the lanes of one job under that job's title.
-        assert_eq!(harness.get_all_by_label("IN").count(), 2);
-        assert_eq!(harness.get_all_by_label("OUT").count(), 2);
-        let mut inbound: Vec<_> = harness.get_all_by_label("IN").map(|r| r.rect()).collect();
+        assert_eq!(harness.get_all_by_label("Inbound").count(), 2);
+        assert_eq!(harness.get_all_by_label("Outbound").count(), 2);
+        let mut inbound: Vec<_> = harness.get_all_by_label("Inbound").map(|r| r.rect()).collect();
         inbound.sort_by(|a, b| a.top().total_cmp(&b.top()));
         assert!(inbound[0].top() < inbound[1].top());
         assert!(
@@ -2517,8 +2552,8 @@ mod tests {
         harness.state_mut().settings.portal_url = "https://portal.nightfall.tv".to_string();
         harness.run_steps(2);
         job_title(&harness, "LUC");
-        harness.get_by_label("IN");
-        harness.get_by_label("OUT");
+        harness.get_by_label("Inbound");
+        harness.get_by_label("Outbound");
         harness.snapshot("watch_duplex");
     }
 

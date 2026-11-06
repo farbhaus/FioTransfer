@@ -300,9 +300,9 @@ impl Home {
         std::fs::read_to_string(self.data().join("settings.json")).unwrap_or_default()
     }
 
-    /// The folder Portal's project folders go under: the default, `~/Portal`.
+    /// The folder Portal's project folders go under: the default, `~/Downloads`.
     fn root(&self) -> PathBuf {
-        self.dir.join("Portal")
+        self.dir.join("Downloads")
     }
 
     /// Every file under the home, as text: what the app wrote, wherever it wrote
