@@ -22,8 +22,12 @@ Frame.io folder's name unless you type one on the link. FioTransfer uses them as
 - **Files already there** when a folder starts syncing (the client's earlier uploads, files already in the
   local folder) are left alone, unless **Include files already there** is on, as for any watch folder.
   Imports skips a file already on disk with the same name and size.
-- **Deletions don't sync.** Deleting a file on one side never deletes it on the other. Each folder moves
-  files one way only.
+- **Deletions don't sync.** Deleting a file on one side never deletes it on the other, and FioTransfer
+  doesn't bring it back by itself. Each folder moves files one way only.
+- **Resync** (the circular arrow on a lane in Watch Folders) transfers again what the other end is missing.
+  Inbound downloads what's on Frame.io but not in the folder: deleted, moved away, or there before syncing
+  started. Outbound uploads what's in the folder but not on Frame.io. Nothing is deleted, and a file that's
+  on both sides is left as it is.
 - **A re-render replaces its earlier copy.** When a file in Exports changes, the new version uploads and the
   copy FioTransfer uploaded before is deleted from Frame.io once the new one is confirmed. A same-named file
   put there some other way stays.

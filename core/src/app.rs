@@ -1121,6 +1121,14 @@ impl App {
         w.update(id, local, acct, folder, label, dir, on_change, include_existing)
     }
 
+    /// Transfers again what a watch's other end is missing (`Watcher::resync`):
+    /// a download watch fetches what isn't on disk, an upload watch sends what
+    /// isn't on Frame.io. Portal's watches too: it changes no setting.
+    pub async fn resync_watch(&self, id: &str) -> Result<crate::xfer::watch::Resync, String> {
+        let Some(w) = self.wat.lock().unwrap().clone() else { return Err("watch folders aren't running".into()) };
+        w.resync(id).await
+    }
+
     pub fn requeue_canceled(&self, id: &str) {
         if let Some(w) = self.wat.lock().unwrap().as_ref() {
             w.requeue_canceled(id);

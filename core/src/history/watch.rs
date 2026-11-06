@@ -249,6 +249,35 @@ FROM watches ORDER BY created_at",
         )
     }
 
+    /// Drops these local file records (`rel_path` and the `updated_at` they
+    /// were read with), each only if nothing rewrote it since, so the next scan
+    /// takes the files as new (a resync). Returns how many went.
+    pub fn drop_watch_files(&self, id: &str, rows: &[(String, i64)]) -> Result<usize, String> {
+        self.drop_each("DELETE FROM watch_files WHERE watch_id=? AND rel_path=? AND IFNULL(updated_at,0)=?", id, rows)
+    }
+
+    /// The same for Frame.io file records, by file ID.
+    pub fn drop_watch_remotes(&self, id: &str, rows: &[(String, i64)]) -> Result<usize, String> {
+        self.drop_each("DELETE FROM watch_remote WHERE watch_id=? AND remote_id=? AND IFNULL(updated_at,0)=?", id, rows)
+    }
+
+    fn drop_each(&self, query: &str, id: &str, rows: &[(String, i64)]) -> Result<usize, String> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.db();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut n = 0;
+        {
+            let mut stmt = tx.prepare(query).map_err(|e| e.to_string())?;
+            for (key, at) in rows {
+                n += stmt.execute(rusqlite::params![id, key, at]).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
     /// Runs `query` once per key, in one transaction.
     fn exec_each(&self, query: &str, id: &str, keys: &[String]) -> Result<(), String> {
         if keys.is_empty() {

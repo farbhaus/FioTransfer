@@ -683,6 +683,16 @@ impl Shell {
                 self.app.requeue_canceled(&id);
                 self.read_watches(ui);
             }
+            Request::ResyncWatch(id) => {
+                let (app, tx) = (self.app.clone(), self.tx.clone());
+                self.spawn_task(async move {
+                    match app.resync_watch(&id).await {
+                        Ok(found) => toast(&tx, resync_words(found), ToastKind::Info),
+                        Err(err) => toast(&tx, format!("Resync: {err}"), ToastKind::Err),
+                    }
+                    let _ = tx.send(Update::Done(Done::Changed));
+                });
+            }
 
             // ---- space ----
             // ---- the destination picker ----
@@ -1624,6 +1634,17 @@ fn can_upload(ui: &mut UiState) -> bool {
     false
 }
 
+/// What a Resync found, as its toast says it.
+fn resync_words(found: fiotransfer_core::xfer::watch::Resync) -> String {
+    let files = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+    match (found.down, found.up) {
+        (0, 0) => "Nothing missing".to_string(),
+        (d, 0) => format!("{} to download", files(d)),
+        (0, u) => format!("{} to upload", files(u)),
+        (d, u) => format!("{} to download, {} to upload", files(d), files(u)),
+    }
+}
+
 /// A message for the user, from a thread that cannot touch the window.
 fn toast(tx: &Sender<Update>, text: impl Into<String>, kind: ToastKind) {
     let _ = tx.send(Update::Done(Done::Toast { text: text.into(), kind }));
@@ -1729,6 +1750,15 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resync_says_what_it_found() {
+        use fiotransfer_core::xfer::watch::Resync;
+        assert_eq!(resync_words(Resync { down: 0, up: 0 }), "Nothing missing");
+        assert_eq!(resync_words(Resync { down: 1, up: 0 }), "1 file to download");
+        assert_eq!(resync_words(Resync { down: 0, up: 3 }), "3 files to upload");
+        assert_eq!(resync_words(Resync { down: 2, up: 1 }), "2 files to download, 1 file to upload");
+    }
 
     fn transfer(fields: (&str, &str, &str, i64, i64, i64)) -> history::Transfer {
         let (id, kind, status, created_at, files_done, total_bytes) = fields;

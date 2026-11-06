@@ -107,6 +107,8 @@ pub enum Action {
     OpenInPortal(String),
     /// Show the folder in Finder (`.w-reveal`).
     Reveal(usize),
+    /// A Portal lane's Resync: transfer again what the other end is missing.
+    Resync(usize),
 }
 
 /// The screen, wired to the app: whatever [`show_with_actions`] reports is
@@ -150,6 +152,11 @@ fn ask(state: &mut UiState, action: Action) {
         Action::Reveal(index) => {
             if let Some(local) = state.watches.get(index).map(|watch| watch.local.clone()) {
                 state.ask(Request::Reveal(local));
+            }
+        }
+        Action::Resync(index) => {
+            if let Some(id) = state.watches.get(index).map(|watch| watch.id.clone()) {
+                state.ask(Request::ResyncWatch(id));
             }
         }
 
@@ -374,7 +381,7 @@ fn watch_row(
         });
 
         middle_cells(ui, watch, columns);
-        actions_cell(ui, columns, index, watch, Some(Action::Remove(index)), action);
+        actions_cell(ui, columns, index, watch, Actions::Row, action);
     });
 
     if watch.from_portal {
@@ -537,8 +544,13 @@ fn sync_lane_row(
         });
 
         middle_cells(ui, watch, columns);
-        // The lane keeps every action but Remove: one Remove, on the job.
-        actions_cell(ui, columns, index, watch, None, action);
+        // The lane keeps every action but Remove (one Remove, on the job), and
+        // has a Resync where the Remove would be.
+        let resync = match watch.lane {
+            Lane::Outbound => RESYNC_OUT,
+            _ => RESYNC_IN,
+        };
+        actions_cell(ui, columns, index, watch, Actions::Lane { resync }, action);
     });
 }
 
@@ -610,20 +622,40 @@ fn empty_cells(ui: &mut egui::Ui, columns: &Columns) {
 
 /// A row's actions, right to left: pause/resume, edit, show in Finder, and the
 /// Remove when the row owns one.
+/// What a row's last action is: a watch's own Remove, or a Portal lane's
+/// Resync (its Remove is the job's), with the tooltip that says which way.
+#[derive(Clone, Copy)]
+enum Actions {
+    Row,
+    Lane { resync: &'static str },
+}
+
+/// A Portal lane's Resync, and what it does for each lane.
+pub const RESYNC: &str = "Resync";
+pub const RESYNC_IN: &str = "Resync: download what's on Frame.io but not here";
+pub const RESYNC_OUT: &str = "Resync: upload what's here but not on Frame.io";
+
 fn actions_cell(
     ui: &mut egui::Ui,
     columns: &Columns,
     index: usize,
     watch: &mut WatchRow,
-    remove: Option<Action>,
+    last: Actions,
     action: &mut Option<Action>,
 ) {
     cell(ui, columns.actions, ROW_HEIGHT, false, |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            if let Some(remove) = remove {
-                if icon_button(ui, Glyph::Trash, "Remove") {
-                    *action = Some(remove);
+            match last {
+                Actions::Row => {
+                    if icon_button(ui, Glyph::Trash, "Remove") {
+                        *action = Some(Action::Remove(index));
+                    }
+                }
+                Actions::Lane { resync } => {
+                    if icon_button_with(ui, Glyph::Resync, RESYNC, resync) {
+                        *action = Some(Action::Resync(index));
+                    }
                 }
             }
             if icon_button(ui, Glyph::Reveal, "Show in Finder") {
@@ -1272,6 +1304,8 @@ enum Glyph {
     Trash,
     /// `.icon-btn`'s close cross, as the Space screen's dialog has it.
     Close,
+    /// A Portal lane's Resync: the circular arrow.
+    Resync,
 }
 
 impl Glyph {
@@ -1299,6 +1333,7 @@ fn paint(painter: &Painter, rect: Rect, glyph: Glyph, colour: Color32, size: f32
         Glyph::Pencil => Icon::Pencil,
         Glyph::Trash => Icon::Trash,
         Glyph::Close => Icon::Close,
+        Glyph::Resync => Icon::Retry,
     };
     icons::paint(painter, rect.center(), size, icon, colour);
 }
@@ -2380,6 +2415,27 @@ mod tests {
     /// The job's Remove is the job's: it asks the app to drop both watches, since
     /// Portal made them as one project. A lane's own pause still names its own
     /// watch.
+    /// Each lane has its own Resync, saying which way it goes, and asks for its
+    /// own watch; a watch the user made has none.
+    #[test]
+    fn each_lane_resyncs_its_own_watch() {
+        let mut rows = vec![watch("/Users/chaos/Movies/Rushes", "Rushes 2026", "upload", true, 3)];
+        rows.extend(luc());
+        let mut harness = screen_harness(state_with(rows));
+        let resyncs: Vec<_> = harness.get_all_by_label(RESYNC).collect();
+        assert_eq!(resyncs.len(), 2, "one per lane, none on the user's row");
+        assert!(resyncs[0].rect().top() < resyncs[1].rect().top(), "inbound first");
+        resyncs[1].hover();
+        harness.run();
+        harness.get_by_label(RESYNC_OUT);
+
+        let resyncs: Vec<_> = harness.get_all_by_label(RESYNC).collect();
+        resyncs[1].click();
+        harness.run();
+        assert_eq!(harness.state().requests, vec![Request::ResyncWatch("id:/Users/chaos/Portal/LUC/OUT".into())]);
+        assert_eq!(harness.get_all_by_label("Remove").count(), 2, "the user's row and the job keep theirs");
+    }
+
     #[test]
     fn the_jobs_remove_and_a_lanes_pause_are_addressed_by_their_own_rows() {
         let mut harness = screen_harness(state_with(luc()));

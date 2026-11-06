@@ -152,6 +152,9 @@ pub enum Request {
         include_existing: bool,
     },
     RequeueCanceled(String),
+    /// Transfer again what this watch's other end is missing
+    /// (`App::resync_watch`).
+    ResyncWatch(String),
 
     /// Open the destination picker (`openDestAt`). An upload opens it at the
     /// remembered destination, `at` one of its levels: `-1` the project list,

@@ -30,7 +30,8 @@ use crate::api::{ApiErr, Asset, Client};
 use crate::history;
 use crate::history::watch::{
     valid_direction, valid_on_change, Watch, WatchFile, WatchRemote, WatchStats, DIR_DOWNLOAD, DIR_MIRROR,
-    ON_CHANGE_OVERWRITE, WATCH_CANCELED, WATCH_DOWNLOADED, WATCH_FAILED, WATCH_IGNORED, WATCH_UPLOADED, WATCH_WAITING,
+    ON_CHANGE_OVERWRITE, WATCH_CANCELED, WATCH_DOWNLOADED, WATCH_FAILED, WATCH_IGNORED, WATCH_QUEUED, WATCH_UPLOADED,
+    WATCH_WAITING,
 };
 use crate::share;
 
@@ -95,6 +96,14 @@ pub struct RemoteListing {
 
 fn same_key(rel: &str, size: i64) -> String {
     format!("{}\u{0}{}", rel.to_lowercase(), size)
+}
+
+/// What [`Watcher::resync`] found missing: files that will download and upload
+/// again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Resync {
+    pub down: usize,
+    pub up: usize,
 }
 
 /// The state one watch keeps between checks. Everything the tick loop, the
@@ -520,6 +529,74 @@ impl Watcher {
         if let Some(s) = ws.get(id) {
             s.lock().invalidate(true);
         }
+    }
+
+    /// resync makes a watch transfer again what is missing at its other end. A
+    /// download side fetches every Frame.io file that isn't in the local folder
+    /// (deleted or moved away here, or there before the watch started); an
+    /// upload side sends every local file that isn't in the Frame.io folder.
+    /// Nothing is deleted on either side, and a file present at both ends is
+    /// left as it is, whatever its size. Returns how many files will transfer.
+    ///
+    /// It only forgets records: the watch's own scans and listings do the
+    /// transfers, so a paused watch resyncs when it's resumed.
+    pub async fn resync(&self, id: &str) -> Result<Resync, String> {
+        let s = self.mu.lock().unwrap().get(id).cloned().ok_or_else(|| "this watch folder no longer exists".to_string())?;
+        let x = s.lock().w.clone();
+        let mut out = Resync::default();
+        if x.downloads() {
+            // An unmounted share would look empty and fetch everything again.
+            local_root_ok(&x.local_path)?;
+            let gone: Vec<(String, i64)> = self
+                .m
+                .hist
+                .watch_remotes(&x.id)?
+                .into_values()
+                .filter(|r| r.state != WATCH_WAITING)
+                .filter(|r| !Path::new(&join_path(&x.local_path, &r.rel_path)).exists())
+                .map(|r| (r.remote_id, r.updated_at))
+                .collect();
+            out.down = self.m.hist.drop_watch_remotes(&x.id, &gone)?;
+            let mut g = s.lock();
+            if g.w.ignore_remote {
+                // Not listed yet: the first listing takes everything, not a baseline.
+                self.m.hist.set_ignore_remote(&x.id, false);
+                g.w.ignore_remote = false;
+            }
+            g.invalidate(true);
+            g.forget_listing();
+        }
+        if x.uploads() {
+            if !self.m.api.auth.logged_in() {
+                return Err(ERR_NOT_SIGNED_IN.to_string());
+            }
+            let there = list_remote(&self.cx, &self.m.api, &x.account_id, &x.folder_id)
+                .await
+                .map_err(|e| list_error(&e))?;
+            let ids: HashSet<&str> = there.iter().map(|f| f.id.as_str()).collect();
+            let names: HashSet<String> = there.iter().map(|f| f.rel.to_lowercase()).collect();
+            let missing: Vec<(String, i64)> = self
+                .m
+                .hist
+                .watch_files(&x.id)?
+                .into_values()
+                .filter(|f| f.state != WATCH_QUEUED)
+                .filter(|f| Path::new(&join_path(&x.local_path, &f.rel_path)).is_file())
+                .filter(|f| !ids.contains(f.remote_id.as_str()) && !names.contains(&f.rel_path.to_lowercase()))
+                .map(|f| (f.rel_path, f.updated_at))
+                .collect();
+            out.up = self.m.hist.drop_watch_files(&x.id, &missing)?;
+            // Folders deleted on Frame.io are made again rather than uploaded into.
+            self.m.hist.clear_watch_dirs(&x.id);
+            s.lock().invalidate(true);
+        }
+        self.m.hist.log(&format!(
+            "WATCH    resync   [{}] {}: {} to download, {} to upload",
+            x.id, x.local_path, out.down, out.up
+        ));
+        self.maybe_list(&s);
+        self.spawn_scan(&s);
+        Ok(out)
     }
 
     /// retry_batch makes a batch's unfinished files eligible again in their
@@ -3180,5 +3257,97 @@ mod props {
                 assert_eq!(model.files.len(), 2);
             }
         }
+
+    /// Resync forgets only what the other end is missing. A download side drops
+    /// the records of files gone from disk (any state but waiting); an upload
+    /// side drops those of local files Frame.io has neither by id nor by name.
+    /// It transfers nothing itself: the watches here are paused.
+    #[test]
+    fn resync_forgets_only_what_the_other_end_is_missing() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        let mut routes: HashMap<String, String> = HashMap::new();
+        routes.insert(
+            "/v4/accounts/acct/folders/UP/children".into(),
+            r#"{"data":[
+  {"id":"f-a","name":"a.mov","type":"file","file_size":1,"status":"uploaded"},
+  {"id":"f-e","name":"renamed.mov","type":"file","file_size":1,"status":"uploaded"}
+],"links":{"next":null}}"#
+                .into(),
+        );
+        let (url, stop, addr, join) = serve(routes);
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let (dl, up) = (tmp.path().join("IN"), tmp.path().join("OUT"));
+        let (data, logs) = (tmp.path().join("data"), tmp.path().join("logs"));
+        for d in [&dl, &up, &data, &logs] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let (dl, up) = (dl.to_string_lossy().into_owned(), up.to_string_lossy().into_owned());
+        let store = Arc::new(history::Store::open(&data, &logs).expect("store"));
+
+        let (down, upr) = rt.block_on(async {
+            let mut c = Client::new(crate::auth::AuthManager::new_static("test-token"));
+            c.base_url = url;
+            let m = super::super::manager::new_tuned(
+                Arc::new(c),
+                store.clone(),
+                Box::new(crate::config::Settings::default),
+                super::super::manager::Tune::default(),
+            );
+            let w = Watcher::new(m);
+            w.add(&dl, "acct", "DL", "In", DIR_DOWNLOAD, ON_CHANGE_OVERWRITE, false).unwrap();
+            w.add(&up, "acct", "UP", "Out", crate::history::watch::DIR_UPLOAD, ON_CHANGE_OVERWRITE, false).unwrap();
+            let id_of = |local: &str| store.watches().unwrap().into_iter().find(|x| x.local_path == local).unwrap().id;
+            let (dl_id, up_id) = (id_of(&dl), id_of(&up));
+            w.set_enabled(&dl_id, false);
+            w.set_enabled(&up_id, false);
+
+            std::fs::write(format!("{dl}/x.mov"), b"x").unwrap();
+            store
+                .put_watch_remotes(
+                    &dl_id,
+                    &[
+                        wr("r1", "x.mov", 1, WATCH_DOWNLOADED),
+                        wr("r2", "gone.mov", 1, WATCH_DOWNLOADED),
+                        wr("r3", "never.mov", 1, WATCH_IGNORED),
+                        wr("r4", "coming.mov", 1, WATCH_WAITING),
+                    ],
+                )
+                .unwrap();
+            let rows: Vec<WatchFile> = [
+                ("a.mov", WATCH_UPLOADED, "f-a"),   // on Frame.io
+                ("b.mov", WATCH_UPLOADED, "f-b"),   // deleted there
+                ("c.mov", WATCH_IGNORED, ""),       // never sent
+                ("d.mov", WATCH_UPLOADED, "f-d"),   // gone here too: nothing to send
+                ("e.mov", WATCH_UPLOADED, "f-e"),   // renamed there: still there
+                ("q.mov", WATCH_QUEUED, ""),        // going anyway
+            ]
+            .iter()
+            .map(|(rel, state, remote)| {
+                if *rel != "d.mov" {
+                    std::fs::write(format!("{up}/{rel}"), b"u").unwrap();
+                }
+                WatchFile { remote_id: remote.to_string(), ..wf(rel, 1, 1, state) }
+            })
+            .collect();
+            store.put_watch_files(&up_id, &rows).unwrap();
+
+            let down = w.resync(&dl_id).await.expect("download resync");
+            let upr = w.resync(&up_id).await.expect("upload resync");
+            assert!(w.resync("nope").await.is_err());
+            w.close();
+            let mut kept_remote: Vec<String> = store.watch_remotes(&dl_id).unwrap().into_keys().collect();
+            kept_remote.sort();
+            assert_eq!(kept_remote, vec!["r1", "r4"], "x.mov is here; coming.mov is still on its way");
+            let mut kept_local: Vec<String> = store.watch_files(&up_id).unwrap().into_keys().collect();
+            kept_local.sort();
+            assert_eq!(kept_local, vec!["a.mov", "d.mov", "e.mov", "q.mov"]);
+            (down, upr)
+        });
+        stop.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(addr); // wake the accept loop
+        join.join().ok();
+        assert_eq!(down, Resync { down: 2, up: 0 });
+        assert_eq!(upr, Resync { down: 0, up: 2 });
+    }
 
 }
