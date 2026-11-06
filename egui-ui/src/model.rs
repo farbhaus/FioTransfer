@@ -369,6 +369,10 @@ pub struct DestPicker {
     pub scroll_sel: bool,
     /// The New folder name field, while it's open.
     pub new_folder: Option<String>,
+    /// The name field takes the keyboard when it's next drawn. Focus is never
+    /// asked for before the field exists: AccessKit aborts on a focused widget
+    /// that isn't in the frame's tree.
+    pub focus_new_folder: bool,
     /// Bumped for each level (`seq`) and each search (`qseq`) asked for: only
     /// the newest answer lands.
     pub seq: u64,
@@ -394,6 +398,7 @@ impl DestPicker {
             kbd: false,
             scroll_sel: false,
             new_folder: None,
+            focus_new_folder: false,
             seq: 0,
             qseq: 0,
             focus_query: true,

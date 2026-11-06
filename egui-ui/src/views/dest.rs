@@ -131,7 +131,7 @@ pub fn show(ctx: &egui::Context, state: &mut UiState) {
             let name = picker.new_folder.as_deref().unwrap_or("").trim().to_string();
             if picker.new_folder.is_none() {
                 picker.new_folder = Some(String::new());
-                ctx.memory_mut(|m| m.request_focus(Id::new(ID).with("new-folder")));
+                picker.focus_new_folder = true;
             } else if !name.is_empty() {
                 state.requests.push(Request::DestNewFolder(name));
             }
@@ -506,6 +506,7 @@ fn foot(ui: &mut Ui, picker: &mut DestPicker, act: &mut Option<Do>) {
                 ui,
                 |ui| {
                     let mut new_folder = false;
+                    let focus = std::mem::take(&mut picker.focus_new_folder);
                     if let Some(name) = picker.new_folder.as_mut() {
                         let field = ui
                             .scope(|ui| {
@@ -519,6 +520,9 @@ fn foot(ui: &mut Ui, picker: &mut DestPicker, act: &mut Option<Do>) {
                                 )
                             })
                             .inner;
+                        if focus {
+                            field.request_focus();
+                        }
                         new_folder |= field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     }
                     new_folder |= subtle_button(ui, NEW_FOLDER, in_folder).clicked();
@@ -687,6 +691,25 @@ mod tests {
         h.get_by_label(ALL_PROJECTS);
         h.get_by_label("Reels");
         h.snapshot("dest_picker_search");
+    }
+
+    /// New folder opens its name field with the caret in it. The field is drawn
+    /// before it's focused: AccessKit aborts the app on a focused widget that
+    /// isn't in the frame's tree (2.0.2, 2026-11-06, with an accessibility
+    /// client running), and kittest checks the same tree.
+    #[test]
+    fn new_folder_opens_a_focused_name_field_and_asks_with_its_name() {
+        let mut h = harness(at_project(DestMode::Upload { pending: Vec::new() }));
+        h.run_steps(2);
+        h.get_by_label(NEW_FOLDER).click();
+        h.run_steps(3);
+        let field = Id::new(ID).with("new-folder");
+        assert!(h.ctx.memory(|m| m.has_focus(field)), "the name field has the caret");
+        h.event(egui::Event::Text("Grade".into()));
+        h.run();
+        h.key_press(Key::Enter);
+        h.run();
+        assert_eq!(h.state().requests, vec![Request::DestNewFolder("Grade".into())]);
     }
 
     #[test]
