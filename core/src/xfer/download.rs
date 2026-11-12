@@ -231,8 +231,10 @@ impl Saver {
             return;
         };
         let tmp = format!("{}.tmp", self.path);
-        if std::fs::write(&tmp, &b).is_ok() {
-            let _ = std::fs::rename(&tmp, &self.path);
+        if std::fs::write(&tmp, &b).is_ok() && std::fs::rename(&tmp, &self.path).is_err() {
+            // A share that refuses the swap keeps the older state; the
+            // half-step must not stay next to the media.
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 
@@ -322,7 +324,7 @@ impl Job {
         }
         let local = f.local_path();
         std::fs::rename(&part_path, &local).map_err(|e| io_msg("rename", &part_path, e))?;
-        let _ = std::fs::remove_file(&state_path);
+        remove_state(&state_path);
         Ok(())
     }
 
@@ -349,6 +351,9 @@ impl Job {
                     None => String::new(),
                 };
                 if md.len() as i64 == size && (owner.is_empty() || owner == f.asset_id) {
+                    // Progress notes without a part file belong to no download:
+                    // left by one that finished while another wrote them.
+                    remove_state(&format!("{}.fiostate", sidecar(&p)));
                     self.set_local_path(f, &p);
                     f.credit(size);
                     f.set_status(Status::Skipped, "already downloaded");
@@ -778,6 +783,21 @@ fn split(p: &str) -> (String, &str) {
     }
 }
 
+/// Removes a download's `.fiostate` and its `.fiostate.tmp`. Network shares
+/// can refuse a delete for a moment after the file was written, so each is
+/// tried a few times.
+fn remove_state(state_path: &str) {
+    for path in [format!("{}.tmp", state_path), state_path.to_string()] {
+        for attempt in 0..4u64 {
+            match std::fs::remove_file(&path) {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) => std::thread::sleep(Duration::from_millis(50 << attempt)),
+            }
+        }
+    }
+}
+
 /// The path prefix for a download's temp files (.fiopart and .fiostate). A name
 /// too long to take those suffixes gets a short hashed one.
 pub fn sidecar(p: &str) -> String {
@@ -1045,6 +1065,18 @@ mod tests {
         assert_eq!(truncate_utf8("éé", 1), "");
         assert_eq!(truncate_utf8("éé", 3), "é");
         assert_eq!(truncate_utf8("aé", 2), "a");
+    }
+
+    #[test]
+    fn a_finished_download_leaves_no_state_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("clip.mov.fiostate");
+        let state = state.to_string_lossy().into_owned();
+        std::fs::write(&state, b"{}").unwrap();
+        std::fs::write(format!("{}.tmp", state), b"{}").unwrap();
+        remove_state(&state);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        remove_state(&state); // nothing there: nothing to do
     }
 
     #[test]
