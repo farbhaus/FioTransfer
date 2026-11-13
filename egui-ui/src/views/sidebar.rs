@@ -752,6 +752,7 @@ mod tests {
                     account_id: "acct-fiorecut".into(),
                     folder_id: "fld-incoming".into(),
                     on_change: "overwrite".into(),
+                    ..Default::default()
                 },
                 WatchRow {
                     id: "w-archive".into(),
@@ -766,6 +767,7 @@ mod tests {
                     account_id: "acct-fiorecut".into(),
                     folder_id: "fld-archive".into(),
                     on_change: "overwrite".into(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()

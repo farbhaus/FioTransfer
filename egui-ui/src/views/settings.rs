@@ -90,6 +90,8 @@ pub enum Action {
     OpenAtLogin(bool),
     /// "Check now" / "Update" (`CheckForUpdate`, `InstallUpdate`).
     UpdateClicked,
+    /// "What's new": the release page.
+    WhatsNew(String),
     /// "Show in Finder" on the App log row (`OpenLogs`).
     ShowLogs,
 
@@ -144,12 +146,24 @@ fn ask(state: &mut UiState, action: Action) {
         }
         Action::CopyRedirect(uri) => state.ask(Request::CopyText(uri)),
         Action::ChooseDownloadFolder => state.ask(Request::PickDownloadDir),
-        Action::Streams(_) | Action::Segment(_) | Action::FolderLogs(_) | Action::UpdateCheck(_) => {
-            state.ask(Request::SaveSettings)
+        Action::Streams(_) | Action::Segment(_) | Action::FolderLogs(_) => state.ask(Request::SaveSettings),
+        Action::UpdateCheck(on) => {
+            state.ask(Request::SaveSettings);
+            // Switched back on: check now, as `#auto-update` did.
+            if on {
+                state.ask(Request::CheckUpdate);
+            }
         }
+        Action::WhatsNew(url) => state.ask(Request::OpenUrl(url)),
         Action::OpenAtLogin(on) => state.ask(Request::SetOpenAtLogin(on)),
         Action::UpdateClicked => {
-            if state.update.available {
+            if state.update.available && !state.update.blocker.trim().is_empty() {
+                // This copy can't replace itself: the release page has the
+                // download (`installUpdate` in app.js).
+                if !state.update.url.trim().is_empty() {
+                    state.ask(Request::OpenUrl(state.update.url.clone()));
+                }
+            } else if state.update.available {
                 state.ask(Request::InstallUpdate);
             } else {
                 state.ask(Request::CheckUpdate);
@@ -637,9 +651,10 @@ fn update_line(state: &UiState) -> UpdateLine {
             help.push_str(update.blocker.trim());
         }
         help
+    } else if update.checked_at > 0 && update.error.trim().is_empty() {
+        // `renderUpdate`: a check that answered with nothing newer.
+        "Up to date".to_string()
     } else {
-        // `#update-line` is only filled once a check has answered; `checked_at`
-        // is not in the state, so an unchecked build shows nothing here.
         String::new()
     };
 
@@ -702,13 +717,24 @@ fn version_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<Acti
                 });
                 if !words.help.is_empty() {
                     ui.add_space(theme::space::XXS);
-                    ui.add(theme::truncating(
-                        RichText::new(&words.help)
-                            .font(theme::detail())
-                            .line_height(Some(HELP_LINE))
-                            .color(theme::TEXT_3),
-                    ))
-                    .on_hover_text(&words.help);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = theme::space::XS;
+                        ui.add(theme::truncating(
+                            RichText::new(&words.help)
+                                .font(theme::detail())
+                                .line_height(Some(HELP_LINE))
+                                .color(theme::TEXT_3),
+                        ))
+                        .on_hover_text(&words.help);
+                        // `· What's new`, the release notes, while one is available.
+                        let url = state.update.url.trim().to_string();
+                        if state.update.available && !url.is_empty() {
+                            ui.label(RichText::new("·").font(theme::detail()).color(theme::TEXT_3));
+                            if ui.link(RichText::new("What's new").font(theme::detail())).clicked() {
+                                *action = Some(Action::WhatsNew(url));
+                            }
+                        }
+                    });
                 }
                 if !words.error.is_empty() {
                     ui.add_space(theme::space::XXS);

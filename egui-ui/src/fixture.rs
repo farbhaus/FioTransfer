@@ -109,6 +109,12 @@ pub fn fixture_state(view: View) -> UiState {
             when: "Today, 09:41".into(),
             files: "42/42".into(),
             size: "21.5 GB".into(),
+            id: "h1".into(),
+            sub: "f.io/Nightfall → ~/Downloads".into(),
+            speed: "96.4 MB/s".into(),
+            duration: "3m 43s".into(),
+            reveal: "~/Downloads/Nightfall_Ep04_Dailies".into(),
+            ..Default::default()
         },
         HistoryRow {
             title: "A006_C003_sh020_v002.mov".into(),
@@ -117,6 +123,23 @@ pub fn fixture_state(view: View) -> UiState {
             when: "Yesterday, 18:02".into(),
             files: "7/8".into(),
             size: "4.10 GB".into(),
+            id: "h2".into(),
+            sub: "To Nightfall / Edit / Exports".into(),
+            speed: "88.0 MB/s".into(),
+            duration: "47s".into(),
+            link: "https://next.frame.io/project/example".into(),
+            can_retry: true,
+            meta: vec![
+                ("From".into(), "~/Movies/Nightfall/Exports".into()),
+                ("To".into(), "Nightfall / Edit / Exports".into()),
+                ("Frame.io".into(), "https://next.frame.io/project/example".into()),
+                ("Started".into(), "Yesterday, 18:01".into()),
+                ("Finished".into(), "Yesterday, 18:02".into()),
+                ("Transferred".into(), "3.60 GB of 4.10 GB".into()),
+                ("Speed".into(), "88.0 MB/s average (704 Mbit/s) · 112 MB/s peak".into()),
+                ("Error".into(), "1 of 8 files failed".into()),
+            ],
+            ..Default::default()
         },
         HistoryRow {
             title: "Trailer_cutdown_v009.mov".into(),
@@ -125,6 +148,12 @@ pub fn fixture_state(view: View) -> UiState {
             when: "27 Oct, 11:15".into(),
             files: "0/1".into(),
             size: "820 MB".into(),
+            id: "h3".into(),
+            sub: "To Trailer / Cuts".into(),
+            speed: "—".into(),
+            duration: "—".into(),
+            can_retry: true,
+            ..Default::default()
         },
     ];
 
@@ -136,6 +165,12 @@ pub fn fixture_state(view: View) -> UiState {
             direction: "upload".into(),
             enabled: true,
             pending: 3,
+            state: "uploading".into(),
+            detail: "2 files".into(),
+            uploaded: 37,
+            canceled: 1,
+            last: "Today, 09:12".into(),
+            link: "https://next.frame.io/project/example/renders".into(),
             // Both fixture watches are the user's: the Watch screen's own
             // snapshot must stay the user-made screen it has always been.
             from_portal: false,
@@ -144,6 +179,7 @@ pub fn fixture_state(view: View) -> UiState {
             account_id: "acct-nightfall".into(),
             folder_id: "fld-ep04-renders".into(),
             on_change: "overwrite".into(),
+            ..Default::default()
         },
         WatchRow {
             id: "w-dailies".into(),
@@ -158,6 +194,7 @@ pub fn fixture_state(view: View) -> UiState {
             account_id: "acct-nightfall".into(),
             folder_id: "fld-ep04-dailies".into(),
             on_change: "overwrite".into(),
+            ..Default::default()
         },
     ];
 
@@ -224,6 +261,30 @@ pub fn fixture_state(view: View) -> UiState {
             stream_limit: 16,
         },
         history,
+        focus_link: false,
+        history_open: ["h2".to_string()].into_iter().collect(),
+        history_files: [(
+            "h2".to_string(),
+            vec![
+                crate::model::HistoryFileRow {
+                    rel_path: "A006_C003_sh020_v002.mov".into(),
+                    size: "512 MB".into(),
+                    status: "the connection dropped".into(),
+                    raw_status: "failed".into(),
+                    ..Default::default()
+                },
+                crate::model::HistoryFileRow {
+                    rel_path: "A006_C003_sh010_v004.mov".into(),
+                    size: "498 MB".into(),
+                    status: "Completed".into(),
+                    raw_status: "done".into(),
+                    view_url: "https://next.frame.io/project/example/file".into(),
+                    ..Default::default()
+                },
+            ],
+        )]
+        .into_iter()
+        .collect(),
         watches,
         // No dialog is open in a picture of the screen; `watch_editor.png` opens
         // one on top of exactly this state.

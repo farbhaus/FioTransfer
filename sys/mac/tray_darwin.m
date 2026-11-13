@@ -113,6 +113,20 @@ static void fioAppMenuAdd(int tries) {
 			q.tag = 3;
 		}
 	}
+	// The File menu the Go app had (main.go): uploads, the link field, the log.
+	NSMenu *main = NSApp.mainMenu;
+	if (![main itemWithTitle:@"File"]) {
+		NSMenu *file = [[NSMenu alloc] initWithTitle:@"File"];
+		fioAdd(file, @"Upload Files…", 8, @"o");
+		NSMenuItem *folder = fioAdd(file, @"Upload Folder…", 9, @"o");
+		folder.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+		fioAdd(file, @"Download from Link…", 10, @"l");
+		[file addItem:[NSMenuItem separatorItem]];
+		fioAdd(file, @"Show Transfer Log", 11, @"");
+		NSMenuItem *top = [[NSMenuItem alloc] initWithTitle:@"File" action:nil keyEquivalent:@""];
+		top.submenu = file;
+		[main insertItem:top atIndex:MIN((NSInteger)1, main.numberOfItems)];
+	}
 	if ([app itemWithTag:6]) return;
 	NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:@"Check for Updates…" action:@selector(act:) keyEquivalent:@""];
 	it.target = fioTarget;

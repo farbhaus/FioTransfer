@@ -99,6 +99,8 @@ pub enum Request {
 
     /// Ask the history store again (`History(query, kind, 500)`).
     History { query: String, kind: String },
+    /// A History row was opened: its files (`HistoryFiles`).
+    HistoryFiles(String),
     /// Write the history to a CSV the user picks (`ExportHistory`).
     ExportCsv,
     /// Open the log folder (`OpenLogs`).
@@ -244,6 +246,12 @@ pub struct UiState {
     pub settings: Settings,
     pub snapshot: Snapshot,
     pub history: Vec<HistoryRow>,
+    /// Asked for the Transfers link field to take the caret (⌘L); the frame
+    /// hands it to the field as it draws it.
+    pub focus_link: bool,
+    /// History rows opened for their details, and the files read for each.
+    pub history_open: std::collections::BTreeSet<String>,
+    pub history_files: std::collections::HashMap<String, Vec<HistoryFileRow>>,
     pub watches: Vec<WatchRow>,
     /// The watch folder editor, while it is open: the draft a pencil or Add
     /// opened, or `None` when no dialog is up. The screen owns it, so nothing
@@ -301,14 +309,49 @@ pub struct UiState {
     pub requests: Vec<Request>,
 }
 
+/// The egui memory flag that puts the caret in the Transfers link field the
+/// next time it is drawn (⌘L, File ▸ Download from Link…).
+pub const FOCUS_LINK: &str = "fiotransfer-egui.focus-link";
+
 #[derive(Debug, Clone, Default)]
 pub struct HistoryRow {
+    /// The transfer's id: what Retry, Copy share link and the details ask for.
+    pub id: String,
     pub title: String,
     pub kind: String,
     pub status: String,
     pub when: String,
     pub files: String,
     pub size: String,
+    /// `To <dest>` for an upload, `<link> → <folder>` for a download.
+    pub sub: String,
+    /// The average speed and how long it took, as the row's last columns word
+    /// them (`fmtSpeed`, `fmtDur`): "—" when unknown.
+    pub speed: String,
+    pub duration: String,
+    /// The Frame.io page of what an upload sent ("" when none).
+    pub link: String,
+    /// Where a download was saved, for "Show in Finder" ("" for an upload).
+    pub reveal: String,
+    /// Failed, partial, canceled or interrupted, and not running: Retry shows.
+    pub can_retry: bool,
+    /// The details block, label then value, in `renderHistoryDetails` order.
+    /// `Frame.io` and `Share` values are links.
+    pub meta: Vec<(String, String)>,
+}
+
+/// One file of an opened History row (`HistoryFiles`), as `fileRows` words it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HistoryFileRow {
+    pub rel_path: String,
+    pub size: String,
+    /// The status, or the error or note that says more (`fileRows`).
+    pub status: String,
+    pub raw_status: String,
+    /// Frame.io page of an uploaded file ("" when none).
+    pub view_url: String,
+    /// The file on disk, offered once it finished ("" otherwise).
+    pub reveal: String,
 }
 
 /// One level of a Frame.io path: account, workspace, project or folder.
@@ -555,6 +598,10 @@ pub struct UpdateState {
     pub error: String,
     /// Why this copy cannot update itself ("development build", …).
     pub blocker: String,
+    /// The release page ("What's new", and where a copy that can't replace
+    /// itself sends the user), and when the last check answered (0: never).
+    pub url: String,
+    pub checked_at: i64,
 }
 
 impl UpdateState {
@@ -569,6 +616,8 @@ impl UpdateState {
             progress: st.progress as f32,
             error: st.error.clone(),
             blocker: st.blocker.clone(),
+            url: st.url.clone(),
+            checked_at: st.checked_at,
         }
     }
 }
@@ -1052,6 +1101,20 @@ pub struct WatchRow {
     /// `overwrite` or `keep`: what happens to a local file that changes after it
     /// has been uploaded. Read by the core on every call, so the editor shows it.
     pub on_change: String,
+    /// The watch's state as the app reports it: watching, paused, uploading,
+    /// downloading, settling, waiting or error, and the words that go with it
+    /// (`3 files`, an error).
+    pub state: String,
+    pub detail: String,
+    /// What it has moved, and what failed or was canceled (the Files column).
+    pub uploaded: i64,
+    pub downloaded: i64,
+    pub failed: i64,
+    pub canceled: i64,
+    /// When it last moved a file, worded for the Last transfer column ("" none).
+    pub last: String,
+    /// The destination folder's Frame.io page ("" until a batch has found it).
+    pub link: String,
 }
 
 impl WatchRow {
@@ -1078,6 +1141,15 @@ impl WatchRow {
             account_id: w.account_id.clone(),
             folder_id: w.folder_id.clone(),
             on_change: w.on_change.clone(),
+            state: w.state.clone(),
+            detail: w.detail.clone(),
+            uploaded: w.uploaded,
+            downloaded: w.downloaded,
+            failed: w.failed,
+            canceled: w.canceled,
+            last: String::new(),
+            link: w.link.clone(),
+            ..Default::default()
         }
     }
 }
@@ -1208,6 +1280,11 @@ pub struct WatchEditor {
     /// next reconcile would overwrite whatever an edit wrote, so the sentence it
     /// carries points at Portal instead.
     pub read_only: bool,
+    /// Files of this watch the user canceled, which "Upload them" queues again
+    /// (`RequeueCanceled`), and the direction the watch had when the dialog
+    /// opened (the button's verb).
+    pub canceled: i64,
+    pub saved_direction: String,
 }
 
 impl WatchEditor {
@@ -1231,6 +1308,8 @@ impl WatchEditor {
             },
             include_existing: false,
             read_only: row.from_portal,
+            canceled: row.canceled,
+            saved_direction: row.direction.clone(),
         }
     }
 
@@ -1248,6 +1327,8 @@ impl WatchEditor {
             on_change: ON_CHANGE_OVERWRITE.to_string(),
             include_existing: false,
             read_only: false,
+            canceled: 0,
+            saved_direction: String::new(),
         }
     }
 
@@ -1756,6 +1837,7 @@ mod tests {
             account_id: "acct-1".to_string(),
             folder_id: "fld-1".to_string(),
             on_change: "keep".to_string(),
+            ..Default::default()
         }
     }
 

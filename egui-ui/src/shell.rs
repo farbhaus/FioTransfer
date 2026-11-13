@@ -62,6 +62,8 @@ pub const ACTIVE_TICK: Duration = Duration::from_millis(100);
 pub const IDLE_TICK: Duration = Duration::from_millis(250);
 /// The expanded job's file list, at the rate the webview asked for it.
 const FILES_EVERY: Duration = Duration::from_millis(900);
+/// How often the watch list is read on the tick.
+const WATCHES_EVERY: Duration = Duration::from_secs(1);
 /// How long this machine's UTC offset is trusted before it is asked again.
 const ZONE_EVERY: Duration = Duration::from_secs(30 * 60);
 /// `History(query, kind, 500)`, the limit the webview asked for.
@@ -147,6 +149,10 @@ pub struct Shell {
     first: bool,
     /// When the app was last read.
     last_tick: Instant,
+    /// When the watch list was last read.
+    watches_at: Option<Instant>,
+    /// Each job's status at the last read, to see one finish.
+    job_status: std::collections::HashMap<String, fiotransfer_core::xfer::Status>,
     /// Whether anything was transferring at the last read (100 ms or 250 ms).
     active: bool,
     /// The History screen's last filter, so a `state-changed` can re-run it.
@@ -222,6 +228,8 @@ impl Shell {
             panel_open: Arc::new(AtomicBool::new(false)),
             first: true,
             last_tick: Instant::now(),
+            watches_at: None,
+            job_status: std::collections::HashMap::new(),
             active: false,
             hist_query: String::new(),
             hist_kind: String::new(),
@@ -469,6 +477,7 @@ impl Shell {
                 self.hist_kind = kind;
                 self.read_history(ui);
             }
+            Request::HistoryFiles(id) => self.read_history_files(ui, &id),
             Request::ExportCsv => {
                 let home = ui.home.clone();
                 self.panel(move |app, tx| match app.export_history() {
@@ -966,6 +975,8 @@ impl Shell {
     /// Everything the app owns: the state, the queue, the watch folders, and the
     /// history rows when that screen is showing.
     fn read_all(&mut self, ui: &mut UiState) {
+        // Something changed: the watch list too, at once.
+        self.watches_at = None;
         self.read_state(ui);
         self.read_running(ui);
         if ui.view == View::History {
@@ -1016,9 +1027,42 @@ impl Shell {
     fn read_running(&mut self, ui: &mut UiState) {
         ui.snapshot = self.app.snapshot();
         self.active = ui.snapshot.jobs.iter().any(|job| !job.terminal());
-        self.read_watches(ui);
+        self.on_jobs_finished(ui);
+        // The watch list costs a database read per watch: once a second is what
+        // it needs (the webview asked every two), not every frame tick.
+        if self.watches_at.map(|at| at.elapsed() >= WATCHES_EVERY).unwrap_or(true) {
+            self.read_watches(ui);
+        }
         self.read_files(ui);
         self.read_space(ui);
+    }
+
+    /// `onJobFinished` in app.js: a transfer that just failed says so for ten
+    /// seconds, and an open History screen takes in whatever just finished.
+    fn on_jobs_finished(&mut self, ui: &mut UiState) {
+        let mut finished = false;
+        let mut seen = std::collections::HashMap::new();
+        for job in &ui.snapshot.jobs {
+            if let Some(prev) = self.job_status.get(&job.id) {
+                if !prev.terminal() && job.terminal() {
+                    finished = true;
+                    if job.status == fiotransfer_core::xfer::Status::Failed {
+                        let what = if job.kind == "upload" { "Upload" } else { "Download" };
+                        let why = if job.error.is_empty() { job.title.clone() } else { job.error.clone() };
+                        ui.toasts.push(crate::model::Toast {
+                            text: failed_toast(what, &why),
+                            kind: ToastKind::Err,
+                            seconds: 10.0,
+                        });
+                    }
+                }
+            }
+            seen.insert(job.id.clone(), job.status);
+        }
+        self.job_status = seen;
+        if finished && ui.view == View::History {
+            self.read_history(ui);
+        }
     }
 
     /// `Space` and `SpaceWalking`: what the last reading found and whether a
@@ -1040,7 +1084,21 @@ impl Shell {
     /// `duplex_id` itself, so the order here is what a straight walk of
     /// `UiState::watches` sees, not something it has to trust.
     fn read_watches(&mut self, ui: &mut UiState) {
-        let rows: Vec<WatchRow> = self.app.watches().iter().map(WatchRow::from_core).collect();
+        self.watches_at = Some(Instant::now());
+        let zone = self.offset();
+        let now = now_ms();
+        let rows: Vec<WatchRow> = self
+            .app
+            .watches()
+            .iter()
+            .map(|w| {
+                let mut row = WatchRow::from_core(w);
+                if w.last_transfer > 0 {
+                    row.last = fmt_when(w.last_transfer, zone, now);
+                }
+                row
+            })
+            .collect();
         ui.watches = in_block_order(rows);
     }
 
@@ -1080,10 +1138,19 @@ impl Shell {
                     .collect();
                 let zone = self.offset();
                 let now = now_ms();
+                let home = ui.home.clone();
                 ui.history = rows
                     .iter()
-                    .map(|row| history_row(row, &running, zone, now))
+                    .map(|row| history_row(row, &running, zone, now, &home))
                     .collect();
+                // Open rows keep their details current, as `loadHistory`
+                // re-rendered them; rows no longer listed close.
+                let listed: HashSet<String> = ui.history.iter().map(|r| r.id.clone()).collect();
+                ui.history_open.retain(|id| listed.contains(id));
+                ui.history_files.retain(|id, _| listed.contains(id));
+                for id in ui.history_open.clone() {
+                    self.read_history_files(ui, &id);
+                }
             }
             Err(err) => {
                 // Keep what was on screen: a database that answered a moment ago
@@ -1091,6 +1158,18 @@ impl Shell {
                 ui.history = previous;
                 ui.push_toast(err, ToastKind::Err);
             }
+        }
+    }
+
+    /// One History row's files (`HistoryFiles`), worded as `fileRows` does.
+    fn read_history_files(&mut self, ui: &mut UiState, id: &str) {
+        let kind = ui.history.iter().find(|r| r.id == id).map(|r| r.kind.clone()).unwrap_or_default();
+        match self.app.history_files(id) {
+            Ok(files) => {
+                let rows = files.iter().map(|f| history_file_row(f, &kind)).collect();
+                ui.history_files.insert(id.to_string(), rows);
+            }
+            Err(err) => ui.push_toast(err, ToastKind::Err),
         }
     }
 
@@ -1516,6 +1595,21 @@ impl Shell {
                 }
             }
             menubar::QUIT => self.handle(Request::Quit, ui),
+            // The File menu, as main.go built it.
+            menubar::UPLOAD_FILES => {
+                self.focus = true;
+                self.handle(Request::PickFiles, ui);
+            }
+            menubar::UPLOAD_FOLDER => {
+                self.focus = true;
+                self.handle(Request::PickFolder, ui);
+            }
+            menubar::FOCUS_LINK => {
+                self.focus = true;
+                ui.view = View::Transfers;
+                ui.focus_link = true;
+            }
+            menubar::SHOW_LOG => self.handle(Request::OpenLogs, ui),
             _ => {}
         }
     }
@@ -1656,18 +1750,93 @@ fn toast(tx: &Sender<Update>, text: impl Into<String>, kind: ToastKind) {
 /// `loadHistory`: `files_done/files_total`, `fmtBytes(total_bytes)` and a date;
 /// a transfer that is still running right now shows as running, however it was
 /// last saved.
-fn history_row(transfer: &history::Transfer, running: &HashSet<&str>, zone: i64, now: i64) -> HistoryRow {
-    HistoryRow {
-        title: transfer.title.clone(),
-        kind: transfer.kind.clone(),
-        status: if running.contains(transfer.id.as_str()) {
-            "running".to_string()
+fn history_row(transfer: &history::Transfer, running: &HashSet<&str>, zone: i64, now: i64, home: &str) -> HistoryRow {
+    let t = transfer;
+    let active = running.contains(t.id.as_str());
+    let upload = t.kind == "upload";
+    let dur = if t.finished_at > 0 && t.started_at > 0 { (t.finished_at - t.started_at) as f64 / 1000.0 } else { 0.0 };
+    let short_link = t.source.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/');
+    let sub = if upload {
+        format!("To {}", t.dest)
+    } else {
+        format!("{} → {}", short_link, short_path(home, &t.dest))
+    };
+    let speed = |bps: f64| if bps < 1.0 { "—".to_string() } else { format!("{}/s", fmt_bytes(bps as i64)) };
+    let mbit = |bps: f64| format!("{} Mbit/s", (bps * 8.0 / 1e6).round() as i64);
+    let stamp = |ms: i64| if ms > 0 { fmt_when(ms, zone, now) } else { "—".to_string() };
+    // `renderHistoryDetails`: what it came from, where it went, when, how much
+    // and how fast, and the links.
+    let mut meta: Vec<(String, String)> = vec![
+        (if upload { "From" } else { "Link" }.to_string(), t.source.clone()),
+        (if upload { "To" } else { "Saved to" }.to_string(), t.dest.clone()),
+    ];
+    if !t.link.is_empty() {
+        meta.push(("Frame.io".to_string(), t.link.clone()));
+    }
+    if !t.share_link.is_empty() {
+        meta.push(("Share".to_string(), t.share_link.clone()));
+    }
+    meta.push(("Started".to_string(), stamp(t.started_at)));
+    meta.push(("Finished".to_string(), stamp(t.finished_at)));
+    meta.push(("Transferred".to_string(), format!("{} of {}", fmt_bytes(t.done_bytes), fmt_bytes(t.total_bytes))));
+    meta.push((
+        "Speed".to_string(),
+        if t.avg_bps > 0.0 {
+            let mut s = format!("{} average ({})", speed(t.avg_bps), mbit(t.avg_bps));
+            if t.peak_bps > 0.0 {
+                s.push_str(&format!(" · {} peak", speed(t.peak_bps)));
+            }
+            s
         } else {
-            transfer.status.clone()
+            "—".to_string()
         },
-        when: fmt_when(transfer.created_at, zone, now),
-        files: format!("{}/{}", transfer.files_done, transfer.files_total),
-        size: fmt_bytes(transfer.total_bytes),
+    ));
+    meta.push(("Transfer ID".to_string(), t.id.clone()));
+    if !t.error.is_empty() {
+        meta.push(("Error".to_string(), t.error.clone()));
+    }
+    HistoryRow {
+        id: t.id.clone(),
+        title: t.title.clone(),
+        kind: t.kind.clone(),
+        status: if active { "running".to_string() } else { t.status.clone() },
+        when: fmt_when(t.created_at, zone, now),
+        files: format!("{}/{}", t.files_done, t.files_total),
+        size: fmt_bytes(t.total_bytes),
+        sub,
+        speed: speed(t.avg_bps),
+        duration: if dur > 0.0 { crate::model::fmt_dur(dur) } else { "—".to_string() },
+        link: t.link.clone(),
+        reveal: if upload { String::new() } else { t.dest.clone() },
+        can_retry: !active && matches!(t.status.as_str(), "failed" | "partial" | "canceled" | "interrupted"),
+        meta,
+    }
+}
+
+/// What a failed transfer's toast says: `Upload failed: <why>`.
+fn failed_toast(what: &str, why: &str) -> String {
+    format!("{what} failed: {why}")
+}
+
+/// One file of a History row, as `fileRows` words it: the error of a failed
+/// file, the note of a skipped one, the note of a done one when it has one.
+fn history_file_row(f: &history::File, kind: &str) -> crate::model::HistoryFileRow {
+    let label = crate::views::history::status_label(&f.status, kind);
+    let status = match f.status.as_str() {
+        "failed" if !f.error.is_empty() => f.error.clone(),
+        "failed" => "Failed".to_string(),
+        "skipped" if !f.note.is_empty() => f.note.clone(),
+        "done" | "running" if !f.note.is_empty() => f.note.clone(),
+        _ => label,
+    };
+    let finished = matches!(f.status.as_str(), "done" | "skipped" | "partial" | "canceled" | "interrupted");
+    crate::model::HistoryFileRow {
+        rel_path: f.rel_path.clone(),
+        size: fmt_bytes(f.size),
+        status,
+        raw_status: f.status.clone(),
+        view_url: f.view_url.clone(),
+        reveal: if finished && !f.local_path.is_empty() { f.local_path.clone() } else { String::new() },
     }
 }
 
@@ -1781,7 +1950,7 @@ mod tests {
     #[test]
     fn a_history_row_is_worded_the_way_the_screen_words_it() {
         let running: HashSet<&str> = ["run-1"].into_iter().collect();
-        let row = history_row(&transfer(("run-1", "download", "done", MARCH, 2, 4_100_000)), &running, 0, MARCH);
+        let row = history_row(&transfer(("run-1", "download", "done", MARCH, 2, 4_100_000)), &running, 0, MARCH, "");
         assert_eq!(row.title, "run-1.mov");
         assert_eq!(row.kind, "download");
         assert_eq!(row.status, "running", "a live transfer shows as running");
@@ -1789,7 +1958,7 @@ mod tests {
         assert_eq!(row.size, "4.10 MB");
         assert_eq!(row.when, "Today, 09:41");
 
-        let idle = history_row(&transfer(("t-2", "upload", "failed", MARCH, 0, 820_000_000)), &running, 0, MARCH);
+        let idle = history_row(&transfer(("t-2", "upload", "failed", MARCH, 0, 820_000_000)), &running, 0, MARCH, "");
         assert_eq!(idle.status, "failed", "the stored status when nothing is running");
         assert_eq!(idle.when, "Today, 09:41");
     }

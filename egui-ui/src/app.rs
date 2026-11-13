@@ -122,6 +122,7 @@ impl FioApp {
         // Files dropped on the window, asked for before the shell pumps so the
         // upload starts this frame.
         crate::views::drop::take(ctx, &mut self.state);
+        file_shortcuts(ctx, &mut self.state);
         // The shell goes first: requests out, answers in, the app read on its
         // tick — all before a single pixel of this frame.
         self.drive_shell(ctx);
@@ -133,12 +134,20 @@ impl FioApp {
         draw_toasts(ctx, &self.state.toasts);
     }
 
+    /// Hands the frame the caret request the shell or a shortcut made.
+    fn focus_link(ctx: &egui::Context, state: &mut UiState) {
+        if std::mem::take(&mut state.focus_link) {
+            ctx.data_mut(|d| d.insert_temp(egui::Id::new(crate::model::FOCUS_LINK), true));
+        }
+    }
+
     /// Pump the app, then act on what it asked egui for.
     #[cfg(not(target_arch = "wasm32"))]
     fn drive_shell(&mut self, ctx: &egui::Context) {
         let Some(shell) = self.shell.as_mut() else { return };
         shell.attach(ctx);
         shell.pump(&mut self.state);
+        Self::focus_link(ctx, &mut self.state);
         if shell.take_focus() {
             // `Host::show_window`: the menu bar, a Finder service or a sign-in
             // brought the app back to the front, hidden or not.
@@ -479,5 +488,26 @@ mod tests {
         assert_eq!(SIDEBAR_WIDTH, 224.0);
         assert_eq!(SIDEBAR_WIDTH, theme::size::SIDEBAR_W);
         assert_eq!(SIDEBAR_WIDTH, crate::views::sidebar::WIDTH);
+    }
+}
+
+/// The File menu's shortcuts, as the Go app's menu had them: ⌘O upload files,
+/// ⇧⌘O upload a folder, ⌘L the download link field. On macOS the native File
+/// menu (`tray_darwin.m`) owns the keys and sends the same actions; these
+/// serve the other platforms, and a menu that isn't there yet.
+fn file_shortcuts(ctx: &egui::Context, state: &mut UiState) {
+    use egui::{Key, KeyboardShortcut, Modifiers};
+    let folder = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::O);
+    let files = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
+    let link = KeyboardShortcut::new(Modifiers::COMMAND, Key::L);
+    // The longer shortcut first: ⇧⌘O also matches ⌘O's keys.
+    if ctx.input_mut(|i| i.consume_shortcut(&folder)) {
+        state.ask(crate::model::Request::PickFolder);
+    } else if ctx.input_mut(|i| i.consume_shortcut(&files)) {
+        state.ask(crate::model::Request::PickFiles);
+    }
+    if ctx.input_mut(|i| i.consume_shortcut(&link)) {
+        state.view = crate::model::View::Transfers;
+        state.focus_link = true;
     }
 }

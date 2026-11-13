@@ -314,6 +314,7 @@ fn a_tall_screen_scrolls_instead_of_widening() {
             account_id: "acct-nightfall".into(),
             folder_id: format!("fld-reel-{i:03}"),
             on_change: "overwrite".into(),
+            ..Default::default()
         })
         .collect();
     let mut harness = Harness::builder()

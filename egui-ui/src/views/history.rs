@@ -9,7 +9,7 @@
 //! the page head; the tokens come from [`crate::theme`].
 
 use crate::icons;
-use crate::model::{HistoryRow, Request, UiState};
+use crate::model::{HistoryFileRow, HistoryRow, Request, UiState};
 use crate::theme;
 use egui::{
     Align, Color32, CornerRadius, Id, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind,
@@ -27,10 +27,16 @@ const ROW_PADDING_X: f32 = theme::space::ROW_X;
 /// `.hist-grid { gap: 12px }`.
 const COLUMN_GAP: f32 = theme::space::XL;
 /// The fixed columns of `.hist-grid` this screen keeps; the name takes the rest.
-const DATE_WIDTH: f32 = 160.0;
+const DATE_WIDTH: f32 = 132.0;
 const FILES_WIDTH: f32 = 72.0;
 const SIZE_WIDTH: f32 = 76.0;
-const STATUS_WIDTH: f32 = 150.0;
+const STATUS_WIDTH: f32 = 140.0;
+/// `.h-speed`, `.h-dur` and the row's actions (Open, Retry, Show in Finder).
+const SPEED_WIDTH: f32 = 80.0;
+const DUR_WIDTH: f32 = 60.0;
+const ACTIONS_WIDTH: f32 = 80.0;
+/// `.files` caps the rows an opened transfer lists.
+const FILES_SHOWN: usize = 400;
 /// Below this the name column would vanish; the table keeps it and lets the
 /// fixed columns hold their width.
 const MIN_NAME_WIDTH: f32 = 120.0;
@@ -91,6 +97,16 @@ pub enum Action {
     /// the first 500 rows (`call('History', query, kind, 500)`). Until that
     /// answer lands the table filters the rows it already holds.
     Filter { query: String, kind: KindFilter },
+    /// A row was clicked: open or close its details (`histExpanded`).
+    Toggle(String),
+    /// `.h-retry`: run the transfer again (a watch batch goes back to its watch).
+    Retry(String),
+    /// `.h-open`, a details link, or a file's Frame.io page.
+    Open(String),
+    /// `.h-reveal` and a finished file's "Show in Finder".
+    Reveal(String),
+    /// The details' "Copy share link" (`copyShare`).
+    CopyShare(String),
 }
 
 /// How long the search box waits for typing to stop before it asks the app
@@ -116,6 +132,16 @@ fn ask(state: &mut UiState, action: Action) {
             query,
             kind: kind.query().to_string(),
         }),
+        Action::Toggle(id) => {
+            if !state.history_open.remove(&id) {
+                state.history_open.insert(id.clone());
+                state.ask(Request::HistoryFiles(id));
+            }
+        }
+        Action::Retry(id) => state.ask(Request::Retry(id)),
+        Action::Open(url) => state.ask(Request::OpenUrl(url)),
+        Action::Reveal(path) => state.ask(Request::Reveal(path)),
+        Action::CopyShare(id) => state.ask(Request::ShareLink(id)),
     }
 }
 
@@ -223,7 +249,15 @@ pub fn show_with_actions(ui: &mut egui::Ui, state: &mut UiState) -> Option<Actio
     let columns = columns((ui.available_width() - 2.0 * ROW_PADDING_X).max(0.0));
     list_head(ui, &columns);
     for row in rows {
-        history_row(ui, row, &columns);
+        let open = state.history_open.contains(&row.id);
+        if let Some(a) = history_row(ui, row, &columns, open) {
+            action = Some(a);
+        }
+        if open {
+            if let Some(a) = details(ui, row, state.history_files.get(&row.id)) {
+                action = Some(a);
+            }
+        }
     }
 
     action
@@ -252,17 +286,24 @@ struct Columns {
     date: f32,
     files: f32,
     size: f32,
+    speed: f32,
+    duration: f32,
     status: f32,
+    actions: f32,
 }
 
 fn columns(available: f32) -> Columns {
-    let fixed = DATE_WIDTH + FILES_WIDTH + SIZE_WIDTH + STATUS_WIDTH + 4.0 * COLUMN_GAP;
+    let fixed = DATE_WIDTH + FILES_WIDTH + SIZE_WIDTH + SPEED_WIDTH + DUR_WIDTH + STATUS_WIDTH + ACTIONS_WIDTH
+        + 7.0 * COLUMN_GAP;
     Columns {
         name: (available - fixed).max(MIN_NAME_WIDTH),
         date: DATE_WIDTH,
         files: FILES_WIDTH,
         size: SIZE_WIDTH,
+        speed: SPEED_WIDTH,
+        duration: DUR_WIDTH,
         status: STATUS_WIDTH,
+        actions: ACTIONS_WIDTH,
     }
 }
 
@@ -356,7 +397,10 @@ fn list_head(ui: &mut egui::Ui, columns: &Columns) {
         head_cell(ui, columns.date, false, "Date");
         head_cell(ui, columns.files, true, "Files");
         head_cell(ui, columns.size, true, "Size");
+        head_cell(ui, columns.speed, true, "Speed");
+        head_cell(ui, columns.duration, true, "Duration");
         head_cell(ui, columns.status, false, "Status");
+        head_cell(ui, columns.actions, false, "");
     });
 }
 
@@ -372,19 +416,36 @@ fn head_cell(ui: &mut egui::Ui, width: f32, right: bool, text: &str) {
 }
 
 /// One past transfer (`.row .row-main`).
-fn history_row(ui: &mut egui::Ui, row: &HistoryRow, columns: &Columns) {
+fn history_row(ui: &mut egui::Ui, row: &HistoryRow, columns: &Columns, open: bool) -> Option<Action> {
+    let mut action = None;
+    // The whole row opens the details (`.clickable-row`); its buttons, drawn on
+    // top, keep their own clicks.
+    let width = ui.available_width().max(0.0);
+    let row_rect = Rect::from_min_size(ui.cursor().min, vec2(width, ROW_HEIGHT));
+    let clicked = ui.interact(row_rect, Id::new(("fiotransfer-egui.history.row", &row.id)), Sense::click()).clicked();
     strip(ui, ROW_HEIGHT, true, |ui| {
+        // The row is one click target: its words are not text to select.
+        ui.style_mut().interaction.selectable_labels = false;
         // Name: the kind tile, then the title.
         cell(ui, columns.name, ROW_HEIGHT, false, |ui| {
             ui.spacing_mut().item_spacing.x = theme::space::XL;
             kind_tile(ui, &row.kind);
-            ui.add(theme::truncating(
-                RichText::new(&row.title)
-                    .font(theme::body())
-                    .color(theme::TEXT)
-                    .strong(),
-            ))
-            .on_hover_text(&row.title);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.add(theme::truncating(
+                    RichText::new(&row.title)
+                        .font(theme::body())
+                        .color(theme::TEXT)
+                        .strong(),
+                ))
+                .on_hover_text(&row.title);
+                if !row.sub.is_empty() {
+                    ui.add(theme::truncating(
+                        RichText::new(&row.sub).font(theme::detail()).color(theme::TEXT_3),
+                    ))
+                    .on_hover_text(&row.sub);
+                }
+            });
         });
 
         cell(ui, columns.date, ROW_HEIGHT, false, |ui| {
@@ -408,10 +469,139 @@ fn history_row(ui: &mut egui::Ui, row: &HistoryRow, columns: &Columns) {
                     .color(theme::TEXT_2),
             );
         });
+        for (width, text) in [(columns.speed, &row.speed), (columns.duration, &row.duration)] {
+            cell(ui, width, ROW_HEIGHT, true, |ui| {
+                ui.label(RichText::new(text).font(theme::body()).color(theme::TEXT_2));
+            });
+        }
         cell(ui, columns.status, ROW_HEIGHT, false, |ui| {
             status_chip(ui, &row.status, &row.kind);
         });
+        cell(ui, columns.actions, ROW_HEIGHT, false, |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if !row.reveal.is_empty() && icon_button(ui, icons::Icon::Folder, "Show in Finder") {
+                    action = Some(Action::Reveal(row.reveal.clone()));
+                }
+                if row.can_retry && icon_button(ui, icons::Icon::Retry, "Retry") {
+                    action = Some(Action::Retry(row.id.clone()));
+                }
+                if !row.link.is_empty() && icon_button(ui, icons::Icon::Open, "Open in Frame.io") {
+                    action = Some(Action::Open(row.link.clone()));
+                }
+            });
+        });
     });
+    if action.is_none() && clicked {
+        action = Some(Action::Toggle(row.id.clone()));
+    }
+    let _ = open;
+    action
+}
+
+/// A square icon button with a tooltip (`.icon-btn`).
+fn icon_button(ui: &mut egui::Ui, icon: icons::Icon, label: &str) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, theme::R_S, theme::ROW_HOVER);
+    }
+    let color = if response.hovered() { theme::TEXT } else { theme::TEXT_3 };
+    icons::paint(ui.painter(), rect.center(), theme::icon::CONTROL, icon, color);
+    let response = response.on_hover_text(label);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.clicked()
+}
+
+/// An opened row's details (`renderHistoryDetails`): the facts, with the
+/// Frame.io link and "Copy share link", then the files.
+fn details(ui: &mut egui::Ui, row: &HistoryRow, files: Option<&Vec<HistoryFileRow>>) -> Option<Action> {
+    let mut action = None;
+    egui::Frame::NONE
+        .inner_margin(Margin { left: 52, right: 12, top: 8, bottom: 12 })
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(theme::space::L, 4.0);
+            egui::Grid::new(("fiotransfer-egui.history.meta", &row.id)).num_columns(2).spacing(vec2(theme::space::XL, 2.0)).show(ui, |ui| {
+                for (k, v) in &row.meta {
+                    ui.label(RichText::new(k).font(theme::detail()).color(theme::TEXT_3));
+                    ui.horizontal(|ui| {
+                        match k.as_str() {
+                            "Frame.io" | "Share" => {
+                                if ui.link(RichText::new(v).font(theme::detail())).clicked() {
+                                    action = Some(Action::Open(v.clone()));
+                                }
+                                if k == "Frame.io" {
+                                    ui.label(RichText::new("·").font(theme::detail()).color(theme::TEXT_3));
+                                    if ui.link(RichText::new("Copy share link").font(theme::detail())).clicked() {
+                                        action = Some(Action::CopyShare(row.id.clone()));
+                                    }
+                                }
+                            }
+                            _ => {
+                                ui.add(egui::Label::new(RichText::new(v).font(theme::detail()).color(theme::TEXT_2)).selectable(true));
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+            ui.add_space(theme::space::M);
+            match files {
+                None => {
+                    ui.label(RichText::new("…").font(theme::detail()).color(theme::TEXT_3));
+                }
+                Some(list) if list.is_empty() => {
+                    ui.label(RichText::new("No files").font(theme::detail()).color(theme::TEXT_3));
+                }
+                Some(list) => {
+                    // `fileRows`: running, failed, queued, canceled, then done.
+                    let order = |s: &str| match s {
+                        "running" => 0,
+                        "failed" => 1,
+                        "queued" => 2,
+                        "canceled" => 3,
+                        "done" | "skipped" => 4,
+                        _ => 5,
+                    };
+                    let mut sorted: Vec<(usize, &HistoryFileRow)> = list.iter().enumerate().collect();
+                    sorted.sort_by_key(|(i, f)| (order(&f.raw_status), *i));
+                    egui::Grid::new(("fiotransfer-egui.history.files", &row.id)).num_columns(3).spacing(vec2(theme::space::XL, 2.0)).show(ui, |ui| {
+                        for (_, f) in sorted.iter().take(FILES_SHOWN) {
+                            ui.horizontal(|ui| {
+                                ui.add(theme::truncating(RichText::new(&f.rel_path).font(theme::detail()).color(theme::TEXT)))
+                                    .on_hover_text(&f.rel_path);
+                                if !f.view_url.is_empty() {
+                                    if ui.small_button("↗").on_hover_text("Open in Frame.io").clicked() {
+                                        action = Some(Action::Open(f.view_url.clone()));
+                                    }
+                                } else if !f.reveal.is_empty()
+                                    && ui.small_button("↗").on_hover_text("Show in Finder").clicked()
+                                {
+                                    action = Some(Action::Reveal(f.reveal.clone()));
+                                }
+                            });
+                            ui.label(RichText::new(&f.size).font(theme::detail()).color(theme::TEXT_2));
+                            let color = if f.raw_status == "failed" { theme::ERROR_TEXT } else { theme::TEXT_2 };
+                            ui.add(theme::truncating(RichText::new(&f.status).font(theme::detail()).color(color)))
+                                .on_hover_text(&f.status);
+                            ui.end_row();
+                        }
+                    });
+                    if list.len() > FILES_SHOWN {
+                        ui.label(
+                            RichText::new(format!("+ {} more files", list.len() - FILES_SHOWN))
+                                .font(theme::detail())
+                                .color(theme::TEXT_3),
+                        );
+                    }
+                }
+            }
+        });
+    ui.painter().hline(
+        ui.min_rect().x_range(),
+        ui.cursor().min.y - 1.0,
+        theme::hairline(theme::BORDER),
+    );
+    action
 }
 
 /// A fixed-width column of a row.
@@ -576,6 +766,7 @@ mod tests {
             when: when.to_string(),
             files: "4/5".to_string(),
             size: "1.50 GB".to_string(),
+            ..Default::default()
         }
     }
 
@@ -590,6 +781,7 @@ mod tests {
                 when: "Today, 10:24".to_string(),
                 files: "1/1".to_string(),
                 size: "1.50 GB".to_string(),
+                ..Default::default()
             },
             HistoryRow {
                 title: "Rushes".to_string(),
@@ -598,6 +790,7 @@ mod tests {
                 when: "Yesterday, 18:02".to_string(),
                 files: "3/9".to_string(),
                 size: "812 MB".to_string(),
+                ..Default::default()
             },
             HistoryRow {
                 title: "Interview.wav".to_string(),
@@ -606,12 +799,14 @@ mod tests {
                 when: "Mar 4, 2026, 09:00".to_string(),
                 files: "2/2".to_string(),
                 size: "244 KB".to_string(),
+                ..Default::default()
             },
         ]
     }
 
     fn screen_harness(state: UiState) -> Harness<'static, UiState> {
-        Harness::new_state(
+        // The app's window width: the row's actions sit at its right edge.
+        Harness::builder().with_size(egui::vec2(1180.0, 780.0)).build_state(
             |ctx, state: &mut UiState| {
                 crate::app::apply_style_once(ctx);
                 egui::CentralPanel::default().show(ctx, |ui| show(ui, state));
@@ -882,6 +1077,74 @@ mod tests {
         let narrow = columns(120.0);
         assert_eq!(narrow.name, MIN_NAME_WIDTH);
         assert_eq!(columns(0.0).name, MIN_NAME_WIDTH);
+    }
+
+    fn retry_row() -> HistoryRow {
+        HistoryRow {
+            id: "t-1".to_string(),
+            title: "Reel A.mov".to_string(),
+            kind: "upload".to_string(),
+            status: "failed".to_string(),
+            when: "Today, 10:24".to_string(),
+            files: "0/1".to_string(),
+            size: "1.50 GB".to_string(),
+            link: "https://next.frame.io/project/x".to_string(),
+            can_retry: true,
+            meta: vec![
+                ("From".to_string(), "Reel A.mov".to_string()),
+                ("Frame.io".to_string(), "https://next.frame.io/project/x".to_string()),
+                ("Error".to_string(), "the connection dropped".to_string()),
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// Retry and Open in Frame.io are on the row, as `.h-retry` and `.h-open`
+    /// were: a transfer from before a relaunch can be run again from here.
+    #[test]
+    fn a_failed_row_can_be_retried_and_opened() {
+        let mut harness = screen_harness(UiState { history: vec![retry_row()], ..UiState::default() });
+        harness.get_by_label("Retry").click();
+        harness.run();
+        assert!(harness.state().requests.contains(&Request::Retry("t-1".to_string())), "{:?}", harness.state().requests);
+        harness.get_by_label("Open in Frame.io").click();
+        harness.run();
+        assert!(harness.state().requests.contains(&Request::OpenUrl("https://next.frame.io/project/x".to_string())));
+    }
+
+    /// A finished transfer offers no Retry.
+    #[test]
+    fn a_done_row_has_no_retry() {
+        let row = HistoryRow { status: "done".to_string(), can_retry: false, ..retry_row() };
+        let harness = screen_harness(UiState { history: vec![row], ..UiState::default() });
+        assert!(harness.query_by_label("Retry").is_none());
+    }
+
+    /// Clicking the row opens its details (and asks for its files); the details
+    /// carry the Frame.io link, "Copy share link", and the files.
+    #[test]
+    fn a_row_opens_its_details_with_the_files_and_the_share_link() {
+        let mut harness = screen_harness(UiState { history: vec![retry_row()], ..UiState::default() });
+        harness.get_by_label("Today, 10:24").click();
+        harness.run();
+        assert!(harness.state().history_open.contains("t-1"));
+        assert!(harness.state().requests.contains(&Request::HistoryFiles("t-1".to_string())));
+        harness.state_mut().history_files.insert(
+            "t-1".to_string(),
+            vec![HistoryFileRow {
+                rel_path: "Reel A.mov".to_string(),
+                size: "1.50 GB".to_string(),
+                status: "storage refused the part".to_string(),
+                raw_status: "failed".to_string(),
+                ..Default::default()
+            }],
+        );
+        harness.run();
+        harness.get_by_label("storage refused the part");
+        harness.get_by_label("the connection dropped"); // the Error line of the details
+        harness.get_by_label("Copy share link").click();
+        harness.run();
+        assert!(harness.state().requests.contains(&Request::ShareLink("t-1".to_string())));
     }
 
     #[test]

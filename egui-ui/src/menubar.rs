@@ -30,6 +30,12 @@ pub const REOPEN: i32 = 4;
 pub const UPDATE: i32 = 5;
 pub const CHECK: i32 = 6;
 pub const LINK: i32 = 7;
+/// The File menu (`fioFileMenuAdd`): Upload Files… ⌘O, Upload Folder… ⇧⌘O,
+/// Download from Link… ⌘L, Show Transfer Log.
+pub const UPLOAD_FILES: i32 = 8;
+pub const UPLOAD_FOLDER: i32 = 9;
+pub const FOCUS_LINK: i32 = 10;
+pub const SHOW_LOG: i32 = 11;
 
 /// The panel's answer states (`qShowInfo` in `quick_darwin.m`).
 const QUICK_OK: i32 = 1;
@@ -296,5 +302,6 @@ mod tests {
     #[test]
     fn tags_match_tray_darwin_m() {
         assert_eq!((OPEN, LOGIN, QUIT, REOPEN, UPDATE, CHECK, LINK), (1, 2, 3, 4, 5, 6, 7));
+        assert_eq!((UPLOAD_FILES, UPLOAD_FOLDER, FOCUS_LINK, SHOW_LOG), (8, 9, 10, 11));
     }
 }

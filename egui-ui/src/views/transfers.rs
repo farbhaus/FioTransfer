@@ -1027,6 +1027,11 @@ fn link_field(ui: &mut Ui, rect: Rect, composer: &mut Composer) -> egui::Respons
                 .desired_width(width),
         )
     });
+    // ⌘L / File ▸ Download from Link…: the field takes the caret once it is
+    // drawn (never before: see CLAUDE.md on focus and AccessKit).
+    if ui.data_mut(|d| d.remove_temp::<bool>(Id::new(crate::model::FOCUS_LINK))).unwrap_or(false) {
+        response.inner.request_focus();
+    }
     let rect = response.response.rect;
     let painter = ui.painter().clone();
     let icon = pos2(rect.left() + 17.0, rect.center().y);

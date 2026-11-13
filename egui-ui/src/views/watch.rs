@@ -101,6 +101,11 @@ pub enum Action {
     /// Remove a job's lanes together: one Remove on a Smart In/Out Tray, which
     /// takes both of the watches Portal made for it.
     RemoveDuplex { rows: Vec<usize> },
+    /// A watch's "Open in Frame.io" (`.w-open`): its destination folder's page.
+    OpenUrl(String),
+    /// The editor's "Upload them": the watch's canceled files go again
+    /// (`RequeueCanceled`).
+    Requeue(String),
     /// The job's `Open in Portal`: the page for this project's upload link on
     /// the Portal server, `{portal_url}/upload-links/{link id}`. Both lanes are
     /// the same link, so the job needs one of these, not one per lane.
@@ -186,6 +191,13 @@ fn ask(state: &mut UiState, action: Action) {
         // The shell opens it in the browser (`App::open_url`): the app already
         // has the one way out to a URL, and this is that way.
         Action::OpenInPortal(url) => state.ask(Request::OpenUrl(url)),
+        Action::OpenUrl(url) => state.ask(Request::OpenUrl(url)),
+        Action::Requeue(id) => {
+            if let Some(editor) = state.watch_editor.as_mut() {
+                editor.canceled = 0;
+            }
+            state.ask(Request::RequeueCanceled(id));
+        }
     }
 }
 
@@ -492,7 +504,8 @@ fn job_head(
         cell(ui, columns.actions, ROW_HEIGHT, false, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if icon_button_with(ui, Glyph::Trash, "Remove", PORTAL_SENTENCE) {
+                let key = rows.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+                if confirm_remove_with(ui, &format!("duplex:{key}"), PORTAL_SENTENCE) {
                     *action = Some(Action::RemoveDuplex { rows: rows.to_vec() });
                 }
                 // Beside the Remove, the one thing the job offers that acts on
@@ -558,7 +571,6 @@ fn sync_lane_row(
 /// lane and on a watch the user made.
 fn middle_cells(ui: &mut egui::Ui, watch: &WatchRow, columns: &Columns) {
     let verb = direction_verb(&watch.direction);
-    let status = if watch.enabled { STATUS_WATCHING } else { STATUS_PAUSED };
 
     // Frame.io: the direction icon and the destination label.
     cell(ui, columns.dest, ROW_HEIGHT, false, |ui| {
@@ -572,39 +584,109 @@ fn middle_cells(ui: &mut egui::Ui, watch: &WatchRow, columns: &Columns) {
         .on_hover_text(format!("{verb} {}", watch.label));
     });
 
-    // Status: the dot and the word (`.status.watching` / `.status.paused`).
+    // Status: the dot and the word, with what it is about (`WATCH_STATUS`).
     cell(ui, columns.status, ROW_HEIGHT, false, |ui| {
-        let key = if watch.enabled { "watching" } else { "paused" };
+        let key = watch_state(watch);
         dot(ui, theme::status_color(key));
+        let label = status_words(watch);
+        let tip = if key == "waiting" { format!("{} not ready on Frame.io yet", watch.detail) } else { label.clone() };
         ui.add(theme::truncating(
-            RichText::new(status)
+            RichText::new(&label)
                 .font(theme::note())
                 .color(theme::TEXT_2),
-        ));
+        ))
+        .on_hover_text(tip);
     });
 
     if let Some(width) = columns.files {
         cell(ui, width, ROW_HEIGHT, true, |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            // The cell is laid out right to left: the last words go in first,
+            // so it reads "37 · 2 failed · 1 canceled".
+            if watch.canceled > 0 {
+                ui.label(RichText::new(format!("· {} canceled", watch.canceled)).font(theme::body()).color(theme::TEXT_3));
+            }
+            if watch.failed > 0 {
+                ui.label(RichText::new(format!("· {} failed", watch.failed)).font(theme::body()).color(theme::ERROR_TEXT));
+            }
             ui.add(theme::truncating(
-                RichText::new(count_word(watch.pending))
+                RichText::new(moved_words(watch))
                     .font(theme::body())
                     .color(theme::TEXT_2),
             ))
-            .on_hover_text(format!("{} pending", watch.pending));
+            .on_hover_text(moved_tip(watch));
         });
     }
 
     if let Some(width) = columns.last {
         cell(ui, width, ROW_HEIGHT, false, |ui| {
-            // `WatchRow` carries no last-transfer time; the webview prints
-            // an em dash when there is none.
+            let last = if watch.last.is_empty() { "—" } else { watch.last.as_str() };
             ui.label(
-                RichText::new("—")
+                RichText::new(last)
                     .font(theme::body())
                     .color(theme::TEXT_2),
             );
         });
     }
+}
+
+/// The state key the dot is coloured by: the app's, or paused/watching from
+/// the row's own flag when the app gave none.
+fn watch_state(watch: &WatchRow) -> &str {
+    if !watch.enabled {
+        "paused"
+    } else if watch.state.is_empty() {
+        "watching"
+    } else {
+        watch.state.as_str()
+    }
+}
+
+/// `WATCH_STATUS[w.state] + (w.detail ? ` · ${w.detail}` : '')` in app.js.
+fn status_words(watch: &WatchRow) -> String {
+    let word = match watch_state(watch) {
+        "paused" => STATUS_PAUSED,
+        "uploading" => "Uploading",
+        "downloading" => "Downloading",
+        "settling" => "Copying",
+        "waiting" => "Waiting",
+        "error" => "Error",
+        _ => STATUS_WATCHING,
+    };
+    if watch.detail.is_empty() || !watch.enabled {
+        word.to_string()
+    } else {
+        format!("{} · {}", word, watch.detail)
+    }
+}
+
+/// The Files column: what the watch moved, by direction (`↑ n  ↓ m` for a mirror).
+fn moved_words(watch: &WatchRow) -> String {
+    match watch.direction.as_str() {
+        "mirror" => format!("↑ {}  ↓ {}", watch.uploaded, watch.downloaded),
+        "download" => watch.downloaded.to_string(),
+        _ => watch.uploaded.to_string(),
+    }
+}
+
+fn moved_tip(watch: &WatchRow) -> String {
+    let mut parts = Vec::new();
+    if watch.direction != "download" {
+        parts.push(format!("{} uploaded", watch.uploaded));
+    }
+    if watch.direction != "upload" {
+        parts.push(format!("{} downloaded", watch.downloaded));
+    }
+    if watch.failed > 0 {
+        parts.push(format!("{} failed", watch.failed));
+    }
+    if watch.canceled > 0 {
+        parts.push(format!("{} canceled", watch.canceled));
+    }
+    if watch.pending > 0 {
+        parts.push(format!("{} settling", watch.pending));
+    }
+    parts.join(" · ")
 }
 
 /// The middle columns with nothing in them, for a line that has no figures of
@@ -648,7 +730,9 @@ fn actions_cell(
             ui.spacing_mut().item_spacing.x = 2.0;
             match last {
                 Actions::Row => {
-                    if icon_button(ui, Glyph::Trash, "Remove") {
+                    // Two clicks within three seconds, as the webview's
+                    // `W.confirm`: the first turns the trash into "Remove".
+                    if confirm_remove(ui, &watch.id) {
                         *action = Some(Action::Remove(index));
                     }
                 }
@@ -660,6 +744,9 @@ fn actions_cell(
             }
             if icon_button(ui, Glyph::Reveal, "Show in Finder") {
                 *action = Some(Action::Reveal(index));
+            }
+            if !watch.link.is_empty() && icon_button(ui, Glyph::Open, "Open in Frame.io") {
+                *action = Some(Action::OpenUrl(watch.link.clone()));
             }
             if icon_button(ui, Glyph::Pencil, "Edit") {
                 *action = Some(Action::Edit(index));
@@ -701,6 +788,14 @@ pub const EDITOR_LABEL_NAME: &str = "Label";
 pub const EDITOR_LABEL_DIRECTION: &str = "Direction";
 pub const EDITOR_LABEL_ON_CHANGE: &str = "On change";
 pub const EDITOR_INCLUDE: &str = "Include files already there";
+/// `#we-requeue`, by the watch's direction.
+pub const EDITOR_REQUEUE_UP: &str = "Upload them";
+pub const EDITOR_REQUEUE_DOWN: &str = "Download them";
+pub const EDITOR_REQUEUE_BOTH: &str = "Transfer them";
+/// What the trash turns into for the second click.
+pub const REMOVE_CONFIRM: &str = "Remove";
+/// How long the second click may wait.
+const REMOVE_CONFIRM_SECS: f64 = 3.0;
 
 /// The modal's id, so egui keeps its place and the backdrop across frames.
 const EDITOR_ID: &str = "fiotransfer-egui.watch.editor";
@@ -727,6 +822,7 @@ enum Decision {
     Save,
     Choose,
     Destination,
+    Requeue,
 }
 
 /// Draws the editor when one is open, and reports what it decided.
@@ -746,6 +842,11 @@ fn editor(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<Action>) {
         Decision::Cancel => state.watch_editor = None,
         Decision::Choose => *action = Some(Action::ChooseFolder),
         Decision::Destination => *action = Some(Action::ChooseDestination),
+        Decision::Requeue => {
+            if let Some(id) = editor.id.clone() {
+                *action = Some(Action::Requeue(id));
+            }
+        }
         Decision::Save => {
             if let Some(editor) = state.watch_editor.take() {
                 *action = Some(Action::SaveWatch(editor));
@@ -770,6 +871,7 @@ fn editor_dialog(ctx: &egui::Context, editor: &mut WatchEditor, covered: bool) -
     let mut save_clicked = false;
     let mut choose_clicked = false;
     let mut dest_clicked = false;
+    let mut requeue_clicked = false;
 
     let width = (ctx.content_rect().width() * 0.92).min(theme::size::MODAL_W);
     let read_only = editor.read_only;
@@ -871,6 +973,27 @@ fn editor_dialog(ctx: &egui::Context, editor: &mut WatchEditor, covered: bool) -
                         ));
                     });
 
+                    // `#we-canceled-row`: files the user canceled in a batch are
+                    // not picked up again until asked; this is the asking.
+                    if editor.id.is_some() && editor.canceled > 0 {
+                        editor_row(ui, "Canceled", |ui, _id| {
+                            let n = editor.canceled;
+                            ui.label(
+                                RichText::new(format!("{} file{}", n, if n == 1 { "" } else { "s" }))
+                                    .font(theme::body())
+                                    .color(theme::TEXT_2),
+                            );
+                            let verb = match editor.saved_direction.as_str() {
+                                "download" => EDITOR_REQUEUE_DOWN,
+                                "mirror" => EDITOR_REQUEUE_BOTH,
+                                _ => EDITOR_REQUEUE_UP,
+                            };
+                            if subtle_button(ui, verb).clicked() {
+                                requeue_clicked = true;
+                            }
+                        });
+                    }
+
                     // Why Save is off, in the app's own words for it: under the
                     // fields, where the one thing to fix is.
                     if let Some(reason) = reason {
@@ -929,6 +1052,9 @@ fn editor_dialog(ctx: &egui::Context, editor: &mut WatchEditor, covered: bool) -
     }
     if dest_clicked {
         decision = Decision::Destination;
+    }
+    if requeue_clicked {
+        decision = Decision::Requeue;
     }
     if save_clicked {
         decision = Decision::Save;
@@ -1306,6 +1432,8 @@ enum Glyph {
     Close,
     /// A Portal lane's Resync: the circular arrow.
     Resync,
+    /// "Open in Frame.io".
+    Open,
 }
 
 impl Glyph {
@@ -1334,8 +1462,38 @@ fn paint(painter: &Painter, rect: Rect, glyph: Glyph, colour: Color32, size: f32
         Glyph::Trash => Icon::Trash,
         Glyph::Close => Icon::Close,
         Glyph::Resync => Icon::Retry,
+        Glyph::Open => Icon::Open,
     };
     icons::paint(painter, rect.center(), size, icon, colour);
+}
+
+/// The Remove button with its confirmation: the first click arms it for three
+/// seconds (the trash becomes "Remove"), the second removes. `key` names the row.
+fn confirm_remove(ui: &mut egui::Ui, key: &str) -> bool {
+    confirm_remove_with(ui, key, "Remove")
+}
+
+fn confirm_remove_with(ui: &mut egui::Ui, key: &str, tooltip: &str) -> bool {
+    let id = Id::new("fiotransfer-egui.watch.confirm");
+    let now = ui.input(|i| i.time);
+    let armed = ui
+        .data(|d| d.get_temp::<(String, f64)>(id))
+        .filter(|(k, at)| k == key && now - at < REMOVE_CONFIRM_SECS)
+        .is_some();
+    if armed {
+        let button = egui::Button::new(RichText::new(REMOVE_CONFIRM).font(theme::note()).color(theme::ERROR_TEXT));
+        let clicked = ui.add(button).on_hover_text("Click again to remove").clicked();
+        if clicked {
+            ui.data_mut(|d| d.remove_temp::<(String, f64)>(id));
+            return true;
+        }
+        // Back to the trash once the time is up: the shell's own tick repaints.
+        return false;
+    }
+    if icon_button_with(ui, Glyph::Trash, "Remove", tooltip) {
+        ui.data_mut(|d| d.insert_temp(id, (key.to_string(), now)));
+    }
+    false
 }
 
 /// `DIR_VERB` in app.js.
@@ -1344,15 +1502,6 @@ fn direction_verb(direction: &str) -> &'static str {
         "download" => "Downloads from",
         "mirror" => "Mirrors",
         _ => "Uploads to",
-    }
-}
-
-/// The number in the Files column. The webview counts what a folder has moved;
-/// a [`WatchRow`] carries what is still to move.
-fn count_word(pending: i64) -> String {
-    match pending {
-        n if n < 0 => "—".to_string(),
-        n => n.to_string(),
     }
 }
 
@@ -1453,8 +1602,13 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT as _, Queryable};
 
-    fn watch(local: &str, label: &str, direction: &str, enabled: bool, pending: i64) -> WatchRow {
+    /// `moved` is the figure the Files column shows: what the watch uploaded
+    /// (or downloaded, for a download watch).
+    fn watch(local: &str, label: &str, direction: &str, enabled: bool, moved: i64) -> WatchRow {
+        let pending = moved;
         WatchRow {
+            uploaded: if direction == "download" { 0 } else { moved },
+            downloaded: if direction == "download" { moved } else { 0 },
             // The app's watch id, kept distinct from the path so a test can tell
             // which one the screen used.
             id: format!("id:{local}"),
@@ -1471,6 +1625,7 @@ mod tests {
             account_id: "acct-fixture".to_string(),
             folder_id: format!("fld:{local}"),
             on_change: "overwrite".to_string(),
+            ..Default::default()
         }
     }
 
@@ -1660,7 +1815,11 @@ mod tests {
             0,
         )]));
 
+        // The first click arms it (the webview's `W.confirm`); nothing is asked yet.
         harness.get_by_label("Remove").click();
+        harness.run();
+        assert!(harness.state().requests.is_empty(), "one click removes nothing: {:?}", harness.state().requests);
+        harness.get_by_label(REMOVE_CONFIRM).click();
         harness.run();
         assert!(
             harness
@@ -1698,7 +1857,28 @@ mod tests {
             on_change: ON_CHANGE_OVERWRITE.to_string(),
             include_existing: false,
             read_only: false,
+            canceled: 0,
+            saved_direction: DIRECTION_UPLOAD.to_string(),
         }
+    }
+
+    /// The editor of a watch with canceled files offers to send them again
+    /// ("Upload them", `RequeueCanceled`), as the webview's `#we-requeue` did.
+    #[test]
+    fn the_editor_requeues_canceled_files() {
+        let mut editor = draft("/Users/chaos/Movies/Rushes");
+        editor.canceled = 2;
+        let mut harness = screen_harness(state_with_editor(Vec::new(), editor));
+        harness.run();
+        harness.get_by_label("2 files");
+        harness.get_by_label(EDITOR_REQUEUE_UP).click();
+        harness.run();
+        assert!(
+            harness.state().requests.contains(&Request::RequeueCanceled("id:/Users/chaos/Movies/Rushes".to_string())),
+            "{:?}",
+            harness.state().requests
+        );
+        assert!(harness.query_by_label(EDITOR_REQUEUE_UP).is_none(), "asked once: the row goes");
     }
 
     fn state_with_editor(watches: Vec<WatchRow>, editor: WatchEditor) -> UiState {
@@ -2066,6 +2246,15 @@ mod tests {
                 ]),
             );
 
+        {
+            let removals: Vec<_> = harness.get_all_by_label("Remove").collect();
+            if let Some(second) = removals.last() {
+                second.click();
+            }
+        }
+        harness.run();
+        assert!(seen.borrow().is_empty(), "the first click only arms Remove");
+        // The second click on the same row's (now armed) Remove removes it.
         {
             let removals: Vec<_> = harness.get_all_by_label("Remove").collect();
             if let Some(second) = removals.last() {
@@ -2441,6 +2630,9 @@ mod tests {
         let mut harness = screen_harness(state_with(luc()));
 
         harness.get_by_label("Remove").click();
+        harness.run();
+        assert!(harness.state().requests.is_empty(), "the first click only arms Remove");
+        harness.get_by_label(REMOVE_CONFIRM).click();
         harness.run();
         assert_eq!(
             harness.state().requests,
