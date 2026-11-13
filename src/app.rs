@@ -58,7 +58,21 @@ pub async fn dispatch(app: Arc<App>, method: &str, args: Vec<Value>) -> Result<V
         // ---- state ----
         "GetState" => ok(app.get_state()),
         "SaveSettings" => {
-            let s: Settings = serde_json::from_value(arg(&args, 0)).unwrap_or_else(|_| app.settings());
+            // The webview always sent the whole settings object (`{...S.state.settings,
+            // ...patch}`). Settings itself now takes a missing key as its default
+            // (settings.json may be partial), so a payload that isn't a whole
+            // object is refused here instead of resetting what it leaves out.
+            let payload = arg(&args, 0);
+            let whole = payload.as_object().is_some_and(|o| {
+                ["client_id", "redirect_port", "streams", "segment_mb", "download_dir"]
+                    .iter()
+                    .all(|k| o.contains_key(*k))
+            });
+            let s: Settings = if whole {
+                serde_json::from_value(payload).unwrap_or_else(|_| app.settings())
+            } else {
+                app.settings()
+            };
             ok(app.save_settings(s)?)
         }
         "Login" => ok(app.login().await?),

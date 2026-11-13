@@ -137,6 +137,7 @@ fn manager(stub: &Stub, tmp: &std::path::Path) -> Arc<Manager> {
         verify_delays: vec![Duration::from_millis(10)],
         change_check: Duration::from_millis(50),
         stall_limit: Duration::from_secs(5),
+        ..Tune::default()
     };
     new_tuned(Arc::new(api), store, Box::new(Settings::default), tune)
 }

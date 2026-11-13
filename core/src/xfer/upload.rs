@@ -24,9 +24,6 @@ const ERR_CHANGED: &str = "file changed while uploading";
 /// The error Go's `context.Canceled` turns into.
 const ERR_CANCELED: &str = "context canceled";
 
-/// How long a part waits for the file to move before its attempt is abandoned.
-const IDLE_LIMIT: Duration = Duration::from_secs(90);
-
 /// How much of a part one read of the file hands the HTTP client.
 /// How much of a part is read and written at a time. Bigger chunks mean fewer
 /// read/write alternations on the socket, and so fewer moments when the socket
@@ -101,29 +98,51 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
 
     // A previous attempt at this same file, to the same place, that stopped
     // before every part was on Frame.io: pick it up rather than resend it all.
-    let ledger = Arc::new(uploadstate::Ledger::for_source(&path));
+    //
+    // The ledger is keyed by the source path, so it is only this upload's when
+    // no other upload of the same file is running: here (a second drop, a
+    // watch and a manual upload of one file) or in another live process (the
+    // CLI). Otherwise this upload makes its own file on Frame.io and keeps no
+    // ledger, and the running one's ledger and copy are left alone.
+    let _claim = SourceClaim::take(&path);
     let mtime = uploadstate::mtime_ms(std::path::Path::new(&path));
     let now = uploadstate::now_ms();
-    let candidate = ledger.load(size, mtime, now);
-    let saved = match candidate {
-        Some((saved, done))
-            if saved.account_id == acct && saved.folder_id == parent && saved.name == f.name && !saved.media_type.is_empty() =>
-        {
-            Some((saved, done))
+    let mut ledger: Option<Arc<uploadstate::Ledger>> = None;
+    let mut saved = None;
+    if _claim.is_some() {
+        let l = Arc::new(uploadstate::Ledger::for_source(&path));
+        let candidate = l.load(size, mtime, now);
+        let theirs = match &candidate {
+            Some((st, _)) => held_elsewhere(&m, st).await,
+            None => false,
+        };
+        if !theirs {
+            saved = match candidate {
+                Some((st, done))
+                    if st.account_id == acct && st.folder_id == parent && st.name == f.name && !st.media_type.is_empty() =>
+                {
+                    Some((st, done))
+                }
+                other => {
+                    // Wrong destination, or a stale ledger: drop the copy it
+                    // belongs to and start again. Only a delete Frame.io
+                    // answered forgets the copy; otherwise it is left to
+                    // clean_up (no owner: delete it).
+                    if let Some((old, _)) = other {
+                        l.remove();
+                        match delete_with(&m, &old.account_id, &old.file_id, Duration::from_secs(30)).await {
+                            Ok(()) => mark_deleted(&m.hist, &old.file_id),
+                            Err(_) => mark_unfinished(&m.hist, &old.file_id, &old.account_id, &j.id, &f.rel_path, 0, ""),
+                        }
+                    } else if l.exists() {
+                        l.remove();
+                    }
+                    None
+                }
+            };
+            ledger = Some(l);
         }
-        other => {
-            // Wrong destination, or a stale ledger: drop the copy it belongs to
-            // and start again.
-            if let Some((old, _)) = other {
-                let _ = m.api.delete_file(&j.cx, &old.account_id, &old.file_id).await;
-                mark_deleted(&m.hist, &old.file_id);
-                ledger.remove();
-            } else if ledger.exists() {
-                ledger.remove();
-            }
-            None
-        }
-    };
+    }
 
     let (file_id, view_url, content_type, parts, done, resuming) = match saved {
         Some((saved, done)) => {
@@ -162,14 +181,18 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
                 created_at: now,
                 view_url: lu.view_url.clone(),
                 media_type: content_type.clone(),
+                pid: std::process::id() as i64,
+                run: m.run.clone(),
                 parts: parts
                     .iter()
                     .map(|p| uploadstate::PartState { off: p.off, size: p.size, url: p.url.clone() })
                     .collect(),
             };
-            if let Err(e) = ledger.save(&state) {
-                // Not fatal: the upload still works, it just can't be resumed.
-                m.hist.log(&format!("{} resume   [{}] {} — couldn't record the upload for resuming: {}", kind_tag(&j.kind), j.id, f.rel_path, e));
+            if let Some(l) = &ledger {
+                if let Err(e) = l.save(&state) {
+                    // Not fatal: the upload still works, it just can't be resumed.
+                    m.hist.log(&format!("{} resume   [{}] {} — couldn't record the upload for resuming: {}", kind_tag(&j.kind), j.id, f.rel_path, e));
+                }
             }
             let fresh_flags = vec![false; parts.len()];
             (lu.id, lu.view_url, content_type, parts, fresh_flags, 0)
@@ -211,7 +234,9 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
         Err(_) if expired && restart => {
             // The saved upload's URLs are dead: drop it and start this file
             // again from nothing, once.
-            ledger.remove();
+            if let Some(l) = &ledger {
+                l.remove();
+            }
             discard(&j, &f, &file_id).await;
             m.hist.log(&format!(
                 "{} resume   [{}] {} — the saved upload had expired; starting it again",
@@ -225,7 +250,9 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
             // The ledger goes first: a quit can end the process before the
             // delete returns, and clean_up leaves alone a copy a fresh ledger
             // still points at.
-            ledger.remove();
+            if let Some(l) = &ledger {
+                l.remove();
+            }
             discard(&j, &f, &file_id).await;
             Err(e)
         }
@@ -236,7 +263,9 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
     }
 
     // Every byte is there: the ledger has done its job.
-    ledger.remove();
+    if let Some(l) = &ledger {
+        l.remove();
+    }
     mark_sent(&m.hist, &file_id);
     let secs = started.elapsed().as_secs_f64();
     let first = parts.first().map(|p| p.size).unwrap_or(0);
@@ -256,6 +285,40 @@ async fn upload_file_body(j: Arc<Job>, f: Arc<File>, restart: bool) -> Result<()
     // All bytes are on S3; Frame.io assembles the parts. Confirm in the background.
     verify_later(&j, &f, &file_id);
     Ok(())
+}
+
+/// The source paths this process is uploading right now: one upload per file
+/// keeps the ledger (see `upload_file_body`).
+fn uploading() -> &'static Mutex<std::collections::HashSet<String>> {
+    static SET: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// This upload's hold on its source path's ledger, released when it ends.
+struct SourceClaim(String);
+
+impl SourceClaim {
+    /// `None` when another upload in this process holds the path.
+    fn take(path: &str) -> Option<SourceClaim> {
+        let mut g = uploading().lock().unwrap();
+        if g.insert(path.to_string()) {
+            Some(SourceClaim(path.to_string()))
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for SourceClaim {
+    fn drop(&mut self) {
+        uploading().lock().unwrap().remove(&self.0);
+    }
+}
+
+/// Whether a saved upload belongs to another live process (the CLI uploading
+/// the same file): its ledger and its copy on Frame.io are that process's.
+async fn held_elsewhere(m: &Manager, st: &uploadstate::UploadState) -> bool {
+    st.pid != 0 && st.run != m.run && st.pid != std::process::id() as i64 && process_alive(st.pid).await
 }
 
 /// One presigned part: where its bytes start in the file, and where to PUT them.
@@ -284,7 +347,7 @@ async fn send_parts(
     st: &Stat,
     content_type: &str,
     done: &[bool],
-    ledger: &Arc<uploadstate::Ledger>,
+    ledger: &Option<Arc<uploadstate::Ledger>>,
 ) -> Result<(), String> {
     let mut total = 0i64;
     for p in parts {
@@ -329,30 +392,7 @@ async fn send_parts(
         })
     };
 
-    // One idle watchdog for the whole file, not one per part: a task and a timer
-    // per part is pure overhead on a fast link.
-    let last = Arc::new(AtomicI64::new(now_nanos()));
-    let watchdog = {
-        let cx = cx.clone();
-        let last = last.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(5));
-            tick.tick().await;
-            loop {
-                tokio::select! {
-                    _ = cx.cancelled() => return,
-                    _ = tick.tick() => {
-                        let idle = Duration::from_nanos((now_nanos() - last.load(Ordering::Relaxed)).max(0) as u64);
-                        if idle > IDLE_LIMIT {
-                            cx.cancel();
-                            return;
-                        }
-                    }
-                }
-            }
-        })
-    };
-
+    let idle = m.idle_limit;
     let mut handles = Vec::with_capacity(parts.len());
     for (index, p) in parts.iter().enumerate() {
         let f = f.clone();
@@ -362,7 +402,6 @@ async fn send_parts(
         let limiter = m.limiter.clone();
         let (off, psize, url) = (p.off, p.size, p.url.clone());
         let ct = content_type.to_string();
-        let last = last.clone();
         if done.get(index).copied().unwrap_or(false) {
             // This part is already on Frame.io from an earlier attempt: count
             // its bytes as done and leave it alone.
@@ -375,8 +414,12 @@ async fn send_parts(
                 Ok(p) => p,
                 Err(_) => return,
             };
-            match put_part(f, fh, off, psize, &url, &ct, &cx, last).await {
-                Ok(()) => ledger.mark_done(index),
+            match put_part(f, fh, off, psize, &url, &ct, &cx, idle).await {
+                Ok(()) => {
+                    if let Some(l) = &ledger {
+                        l.mark_done(index);
+                    }
+                }
                 Err(e) => {
                     let mut g = cause.lock().unwrap();
                     if g.is_none() {
@@ -393,7 +436,6 @@ async fn send_parts(
         let _ = h.await;
     }
     watcher.abort();
-    watchdog.abort();
 
     // Frame.io only knows the bytes it was sent, so it would accept a copy taken
     // while something was still writing the file.
@@ -783,7 +825,7 @@ async fn put_part(
     url: &str,
     content_type: &str,
     cx: &CancellationToken,
-    last: Arc<AtomicI64>,
+    idle: Duration,
 ) -> Result<(), String> {
     let mut last_err = String::new();
     for attempt in 0..10u32 {
@@ -802,7 +844,7 @@ async fn put_part(
                 f.add(n);
             })
         };
-        match put_once(cx, url, fh.clone(), off, size, content_type, progress, last.clone()).await {
+        match put_once(cx, url, fh.clone(), off, size, content_type, progress, idle).await {
             Ok(status) if (200..300).contains(&status) => {
                 // Make sure progress matches exactly what the part holds.
                 let d = size - sent.load(Ordering::Relaxed);
@@ -844,8 +886,24 @@ fn now_nanos() -> i64 {
         .unwrap_or(0)
 }
 
-/// PUTs one part once and reports the status. An idle watchdog aborts it if
-/// nothing moves for 90 s, which covers the wait for S3's reply too.
+/// Resolves once `last` (from [`now_nanos`]) is `limit` in the past. One timer
+/// per part in flight, re-armed at most once per `limit` while bytes move.
+async fn idle_for(last: &AtomicI64, limit: Duration) {
+    loop {
+        let idle = Duration::from_nanos((now_nanos() - last.load(Ordering::Relaxed)).max(0) as u64);
+        if idle >= limit {
+            return;
+        }
+        tokio::time::sleep(limit - idle).await;
+    }
+}
+
+/// PUTs one part once and reports the status. It is abandoned if nothing moves
+/// for `idle` (90 s), which covers the wait for S3's reply too, as Go's
+/// per-attempt watchdog did. The clock starts here, once the part holds a
+/// stream: a file whose parts wait behind another file's is not idle (a
+/// watchdog per file, started before its parts had streams, cancelled the
+/// second file of a batch of big renders after 90 s, 2026-11-13).
 async fn put_once(
     cx: &CancellationToken,
     url: &str,
@@ -854,9 +912,9 @@ async fn put_once(
     size: i64,
     content_type: &str,
     progress: Progress,
-    last: Arc<AtomicI64>,
+    idle: Duration,
 ) -> Result<u16, String> {
-    let actx = cx.child_token();
+    let last = Arc::new(AtomicI64::new(now_nanos()));
     let body = reqwest::Body::wrap_stream(SectionStream {
         fh,
         pos: off,
@@ -866,7 +924,7 @@ async fn put_once(
         inflight: std::collections::VecDeque::new(),
         short: false,
     });
-    let request = netx::data_client()
+    let request = netx::upload_client()
         .put(url)
         .header(reqwest::header::CONTENT_TYPE, content_type)
         .header("x-amz-acl", "private")
@@ -875,7 +933,8 @@ async fn put_once(
 
     let resp = tokio::select! {
         r = request.send() => r,
-        _ = actx.cancelled() => return Err(ERR_CANCELED.to_string()),
+        _ = idle_for(&last, idle) => return Err(format!("no progress for {}s", idle.as_secs())),
+        _ = cx.cancelled() => return Err(ERR_CANCELED.to_string()),
     };
     let mut resp = match resp {
         Ok(r) => r,
@@ -1046,7 +1105,7 @@ pub async fn ensure_folders(
 /// create_folder creates a folder. When a request fails in a way that leaves it
 /// unclear whether Frame.io made the folder (a timeout or gateway error), the
 /// parent is checked for it before trying again, so a retry never duplicates it.
-async fn create_folder(c: &Client, cx: &CancellationToken, acct: &str, parent: &str, name: &str) -> Result<Asset, String> {
+pub(crate) async fn create_folder(c: &Client, cx: &CancellationToken, acct: &str, parent: &str, name: &str) -> Result<Asset, String> {
     let mut attempt: u32 = 1;
     loop {
         let err = match c.create_folder(cx, acct, parent, name).await {

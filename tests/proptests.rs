@@ -210,6 +210,8 @@ fn state_for(source: &str, parts: usize, created: i64) -> UploadState {
         created_at: created,
         view_url: "http://view/1".into(),
         media_type: "video/mp4".into(),
+        pid: 0,
+        run: String::new(),
         parts: arb_parts(parts),
     }
 }

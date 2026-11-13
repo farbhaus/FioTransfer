@@ -440,6 +440,7 @@ pub struct Manager {
     pub upload_settle: Duration,
     pub stall_limit: Duration,
     pub change_check: Duration,
+    pub idle_limit: Duration,
 
     pub jobs: Mutex<Vec<Arc<Job>>>,
     pub dirty: AtomicBool,

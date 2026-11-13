@@ -246,7 +246,7 @@ impl DropboxClient {
             if status >= 300 {
                 return Err(format!("Dropbox returned {}", status));
             }
-            let mut pg: DropboxPage = serde_json::from_slice(&data)
+            let mut pg: DropboxPage = crate::netx::from_json(&data)
                 .map_err(|_| "unexpected response from Dropbox".to_string())?;
             if pg.share_tokens.len() != pg.entries.len() {
                 pg.share_tokens = Vec::new();

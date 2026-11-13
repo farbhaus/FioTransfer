@@ -63,8 +63,10 @@ impl Link {
     }
 }
 
-/// Who is downloading, for portal links that ask.
-pub type Viewer = Arc<dyn Fn() -> Option<(String, String)> + Send + Sync>;
+/// Who is downloading, for portal links that ask: the signed-in Frame.io user's
+/// name and email. Async, so a front end that hasn't got them yet can ask
+/// Frame.io (Go's app fetched them when they weren't cached; its CLI always did).
+pub type Viewer = Arc<dyn Fn() -> BoxFuture<'static, Option<(String, String)>> + Send + Sync>;
 
 pub static VIEWER: Mutex<Option<Viewer>> = Mutex::new(None);
 
@@ -699,7 +701,7 @@ impl Client {
                 // Go unmarshals a missing "data" and gets the JSON reader's error.
                 return Err("unexpected end of JSON input".to_string());
             }
-            return serde_json::from_value(d).map_err(|e| e.to_string());
+            return crate::netx::from_json_value(d).map_err(|e| e.to_string());
         }
         Err(last_err)
     }

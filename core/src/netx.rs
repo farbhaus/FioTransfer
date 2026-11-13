@@ -12,20 +12,36 @@ use std::time::Duration;
 pub fn data_client() -> &'static reqwest::Client {
     static C: OnceLock<reqwest::Client> = OnceLock::new();
     C.get_or_init(|| {
-        reqwest::Client::builder()
-            .http1_only()
-            .pool_max_idle_per_host(256)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .connect_timeout(Duration::from_secs(20))
-            .tcp_keepalive(Duration::from_secs(30))
-            .tcp_nodelay(true)
+        bulk()
             .read_timeout(Duration::from_secs(120)) // stall detection is the callers' job
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
             .build()
             .expect("data client")
     })
+}
+
+/// Used for upload PUTs: [`data_client`] without its read timeout. reqwest
+/// starts that timer when the request starts and resets it only once the reply
+/// arrives, so it covers the whole request body: every part slower than 120 s
+/// failed, and a file with parts over ~1 GB (Frame.io's layout for anything over
+/// ~35 GB) could never upload (2026-11-13). Go's `ResponseHeaderTimeout` only
+/// started once the body was sent. `upload::put_once` watches each attempt
+/// itself.
+pub fn upload_client() -> &'static reqwest::Client {
+    static C: OnceLock<reqwest::Client> = OnceLock::new();
+    C.get_or_init(|| bulk().build().expect("upload client"))
+}
+
+fn bulk() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .http1_only()
+        .pool_max_idle_per_host(256)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(20))
+        .tcp_keepalive(Duration::from_secs(30))
+        .tcp_nodelay(true)
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
 }
 
 /// Used for JSON API calls.
@@ -89,6 +105,41 @@ pub fn trim_body(b: &[u8]) -> String {
         out
     } else {
         s
+    }
+}
+
+/// Decodes a service's JSON reply the way Go's `encoding/json` did: a `null`
+/// field reads as if the key were absent, so it takes the field's default
+/// instead of failing the whole document. `#[serde(default)]` only covers an
+/// absent key; one unnamed account once emptied the Space screen this way.
+pub fn from_json<T: serde::de::DeserializeOwned>(data: &[u8]) -> serde_json::Result<T> {
+    let mut v: serde_json::Value = serde_json::from_slice(data)?;
+    drop_nulls(&mut v);
+    serde_json::from_value(v)
+}
+
+/// [`from_json`] for a value already parsed.
+pub fn from_json_value<T: serde::de::DeserializeOwned>(mut v: serde_json::Value) -> serde_json::Result<T> {
+    drop_nulls(&mut v);
+    serde_json::from_value(v)
+}
+
+/// Removes every `null` member of every object, at any depth. Nulls inside
+/// arrays stay: an array's length and positions mean something.
+fn drop_nulls(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(m) => {
+            m.retain(|_, x| !x.is_null());
+            for x in m.values_mut() {
+                drop_nulls(x);
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for x in a.iter_mut() {
+                drop_nulls(x);
+            }
+        }
+        _ => {}
     }
 }
 

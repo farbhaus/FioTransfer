@@ -73,10 +73,15 @@ async fn main() {
     let client = Arc::new(Client::new(auth.clone()));
     {
         let c = client.clone();
-        *share::VIEWER.lock().unwrap() = Some(Arc::new(move || None::<(String, String)>.or_else(|| {
-            let _ = &c;
-            None
-        })));
+        // Portal links that ask who is downloading get the signed-in Frame.io
+        // user, as Go's CLI sent.
+        *share::VIEWER.lock().unwrap() = Some(Arc::new(move || {
+            let c = c.clone();
+            Box::pin(async move {
+                let cx = tokio_util::sync::CancellationToken::new();
+                c.me(&cx).await.ok().map(|me| (me.name, me.email))
+            })
+        }));
     }
 
     match cmd.as_str() {
@@ -935,12 +940,23 @@ async fn follow(m: Arc<xfer::Manager>, id: &str) -> i32 {
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     let mut last_line = Instant::now() - Duration::from_secs(10);
     let mut interrupted = false;
+    // Ctrl-C cancels the transfer and lets it finish canceling (a download keeps
+    // its resume files, an upload deletes its unfinished copy), as Go's
+    // signal.NotifyContext did; a second Ctrl-C quits at once.
+    let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
     loop {
-        tick.tick().await;
-        if !interrupted && signalled() {
-            interrupted = true;
-            m.cancel(id);
-            eprintln!("\nCanceling… (run the same command again to resume)");
+        tokio::select! {
+            _ = tick.tick() => {}
+            r = &mut ctrl_c, if !interrupted => {
+                if r.is_ok() {
+                    interrupted = true;
+                    m.cancel(id);
+                    eprintln!("\nCanceling… (run the same command again to resume)");
+                    // The handler stays installed: restore the default so a second
+                    // Ctrl-C ends the process.
+                    restore_sigint();
+                }
+            }
         }
         let snap = m.snapshot();
         let Some(v) = snap.jobs.iter().find(|j| j.id == id) else { continue };
@@ -1015,11 +1031,17 @@ fn stdin_is_tty() -> bool {
     fiotransfer_sys::platform::is_tty(STDIN_FILENO)
 }
 
-fn signalled() -> bool {
-    fiotransfer_sys::platform::sigint_ignored()
+/// Puts SIGINT back to its default action (ends the process), for a second Ctrl-C
+/// during a cancel. `sigint_ignored` sets the default disposition as it asks.
+fn restore_sigint() {
+    let _ = fiotransfer_sys::platform::sigint_ignored();
 }
 
 fn fmt_ms(ms: i64) -> String {
+    // Local time, as Go's time.UnixMilli(...).Format printed it.
+    if let Some(t) = fiotransfer_sys::platform::local_time(ms.div_euclid(1000)) {
+        return format!("{:04}-{:02}-{:02} {:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute);
+    }
     let secs = ms / 1000;
     let days = secs / 86_400;
     let rem = secs % 86_400;

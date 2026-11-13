@@ -621,6 +621,13 @@ fn trailing_bytes_under_a_header_are_unfinished() {
         t.extend(std::iter::repeat(0xab).take(n));
         assert_eq!(state_of(&t), MediaFormat::Unfinished, "{} stray bytes", n);
     }
+    // Zero padding after the movie is a finished file, as the Go app read it:
+    // a render rounded up by its writer must not wait for ever.
+    for n in 1..8usize {
+        let mut t = b.clone();
+        t.extend(std::iter::repeat(0u8).take(n));
+        assert_eq!(state_of(&t), MediaFormat::Finished, "{} zero bytes of padding", n);
+    }
     // Without a moov the same tail is unfinished, so the tolerance is not
     // "assume finished".
     let mut no_moov = Vec::new();

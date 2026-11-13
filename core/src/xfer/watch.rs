@@ -913,6 +913,9 @@ fn walk_dir(
     }
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
+        // The watched folder itself can't be listed (a share gone away): say
+        // so, as Go's walk did, rather than report it empty.
+        Err(_) if is_root => return Err(ERR_FOLDER_UNAVAILABLE.to_string()),
         Err(_) => return Ok(()), // unreadable subfolder: skip it
     };
     let mut entries: Vec<std::fs::DirEntry> = rd.filter_map(|e| e.ok()).collect();
@@ -1572,8 +1575,10 @@ async fn watch_folders(
         let name = base_name(d).to_string();
         let mut id = children.get(&pid).and_then(|k| k.get(&name)).cloned();
         if id.is_none() {
-            let f = c
-                .create_folder(cx, &x.account_id, &pid, &name)
+            // As Go's watchFolders: when the answer is unclear (a timeout, a
+            // gateway error), the parent is checked for the folder before
+            // trying again, so a retry never makes a second one.
+            let f = super::upload::create_folder(c, cx, &x.account_id, &pid, &name)
                 .await
                 .map_err(|e| format!("creating folder {:?}: {}", d, e))?;
             if let Some(k) = children.get_mut(&pid) {

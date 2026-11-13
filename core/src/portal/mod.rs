@@ -1185,7 +1185,7 @@ impl PortalClient {
         let rows = rows(&raw, "upload_links")?;
         let mut out: Vec<UploadLink> = Vec::with_capacity(rows.len());
         for r in rows {
-            out.push(serde_json::from_value(r).map_err(|e| PortalErr::Json(e.to_string()))?);
+            out.push(crate::netx::from_json_value(r).map_err(|e| PortalErr::Json(e.to_string()))?);
         }
         Ok(out)
     }

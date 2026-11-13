@@ -157,7 +157,7 @@ impl WeTransferClient {
             let msg = if e.message.is_empty() { e.error } else { e.message };
             return Err(format!("WeTransfer returned {}: {}", status, msg));
         }
-        let out = serde_json::from_slice(&data)
+        let out = crate::netx::from_json(&data)
             .map_err(|_| format!("unexpected response from WeTransfer ({})", status))?;
         Ok((status, out))
     }

@@ -32,6 +32,9 @@ pub struct Tune {
     pub verify_delays: Vec<Duration>,
     pub change_check: Duration,
     pub stall_limit: Duration,
+    /// How long an upload part's attempt may go without sending a byte or
+    /// getting S3's reply before it is abandoned and sent again.
+    pub idle_limit: Duration,
 }
 
 impl Default for Tune {
@@ -41,6 +44,7 @@ impl Default for Tune {
             verify_delays: VERIFY_DELAYS.iter().map(|s| Duration::from_secs(*s)).collect(),
             change_check: Duration::from_secs(2),
             stall_limit: Duration::from_secs(120),
+            idle_limit: Duration::from_secs(90),
         }
     }
 }
@@ -72,6 +76,7 @@ pub fn new_tuned(
         upload_settle: tune.upload_settle,
         stall_limit: tune.stall_limit,
         change_check: tune.change_check,
+        idle_limit: tune.idle_limit,
         jobs: Mutex::new(Vec::new()),
         dirty: AtomicBool::new(false),
         inspected: Mutex::new(None),
@@ -685,12 +690,13 @@ impl Job {
                 {
                     let mut g = file2.inner.lock().unwrap();
                     g.finished = Some(SystemTime::now());
-                    if let Err(e) = &res {
-                        g.err = e.clone();
-                    }
                     match (&res, j.cx.is_cancelled()) {
+                        // As Go: a canceled file keeps no error text.
                         (Err(_), true) => file2.set_status_locked(&mut g, Status::Canceled),
-                        (Err(_), false) => file2.set_status_locked(&mut g, Status::Failed),
+                        (Err(e), false) => {
+                            g.err = e.clone();
+                            file2.set_status_locked(&mut g, Status::Failed)
+                        }
                         (Ok(()), _) if g.status != Status::Skipped && g.status != Status::Failed => {
                             file2.set_status_locked(&mut g, Status::Done)
                         }

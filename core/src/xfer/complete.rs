@@ -62,9 +62,15 @@ fn quick_time_state<R: Read + Seek>(r: &mut R, size: i64) -> MediaFormat {
         let want = std::cmp::min(16, size - off) as usize;
         let n = read_at(r, &mut h[..want], off).unwrap_or(0);
         if n < 8 {
-            // A partial atom header: the next atom is still arriving. Balanced
-            // against the cost of waiting — an upload that starts early sends a
-            // truncated file, while waiting is capped by the stall limit.
+            // Zero padding after a finished movie (some writers round the file
+            // up): finished, as the Go app read it. Otherwise a partial atom
+            // header: the next atom is still arriving. An upload that starts
+            // early sends a truncated file, while waiting is capped by the
+            // stall limit. (Eight or more zero bytes already read as an atom
+            // that runs to the end of the file.)
+            if moov && h[..n].iter().all(|b| *b == 0) {
+                return MediaFormat::Finished;
+            }
             return MediaFormat::Unfinished;
         }
         let mut length = u32::from_be_bytes([h[0], h[1], h[2], h[3]]) as i64;

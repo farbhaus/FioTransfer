@@ -309,7 +309,17 @@ impl App {
         *self.wat.lock().unwrap() = Some(wat);
         {
             let me = Arc::clone(self);
-            *share::VIEWER.lock().unwrap() = Some(Arc::new(move || me.viewer()));
+            let weak = Arc::downgrade(&me);
+            drop(me);
+            *share::VIEWER.lock().unwrap() = Some(Arc::new(move || {
+                let app = weak.upgrade();
+                Box::pin(async move {
+                    match app {
+                        Some(a) => a.viewer().await,
+                        None => None,
+                    }
+                })
+            }));
         }
         {
             let mgr2 = mgr.clone();
@@ -326,8 +336,14 @@ impl App {
         portal::agent::spawn(Arc::clone(self));
     }
 
-    fn viewer(&self) -> Option<(String, String)> {
-        let me = self.cached_user();
+    /// The signed-in user for a link that asks who is downloading: the cached
+    /// one, or else asked of Frame.io now, as Go's `share.Viewer` did.
+    async fn viewer(&self) -> Option<(String, String)> {
+        let me = match self.cached_user() {
+            Some(u) => Some(u),
+            None if self.auth.logged_in() => self.fetch_user().await,
+            None => None,
+        };
         me.map(|u| (u.name, u.email))
     }
 
@@ -1385,12 +1401,13 @@ impl App {
 
 static GLOBAL: once_cell::sync::OnceCell<Mutex<std::sync::Weak<App>>> = once_cell::sync::OnceCell::new();
 
-fn gone<E: std::fmt::Display>(e: &E) -> String {
-    let text = e.to_string();
-    if text.contains("404") {
+/// A 404 in plain words: search can still list deleted folders. Decided by the
+/// status, as Go's `gone` did, not by "404" appearing somewhere in the text.
+fn gone(e: &api::ApiErr) -> String {
+    if e.status() == Some(404) {
         "no longer on Frame.io".to_string()
     } else {
-        text
+        e.to_string()
     }
 }
 

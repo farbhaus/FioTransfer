@@ -138,7 +138,7 @@ impl LegacyClient {
         q: &[(String, String)],
     ) -> LResult<(reqwest::header::HeaderMap, T)> {
         let (h, data) = self.get_raw(cx, p, q).await?;
-        let out = serde_json::from_slice(&data).map_err(|e| LErr::msg(e.to_string()))?;
+        let out = crate::netx::from_json(&data).map_err(|e| LErr::msg(e.to_string()))?;
         Ok((h, out))
     }
 

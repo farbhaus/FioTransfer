@@ -130,16 +130,20 @@ impl Bucket {
         Bucket { rate: per_sec, burst, tokens: burst, last: Instant::now() }
     }
 
+    /// Reserves one call and says how long to wait before making it, as
+    /// `rate.Limiter.Wait` does: the token is taken now (the count may go
+    /// negative), so callers queued behind each other wait one interval more
+    /// each instead of all leaving at the same moment.
     fn wait_time(&mut self) -> Duration {
         let now = Instant::now();
         let dt = now.duration_since(self.last).as_secs_f64();
         self.tokens = (self.tokens + dt * self.rate).min(self.burst);
         self.last = now;
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
+        self.tokens -= 1.0;
+        if self.tokens >= 0.0 {
             Duration::ZERO
         } else {
-            Duration::from_secs_f64((1.0 - self.tokens) / self.rate)
+            Duration::from_secs_f64(-self.tokens / self.rate)
         }
     }
 }
@@ -167,9 +171,13 @@ impl Limiters {
         }
         let spec = LimitSpec { calls, window: Duration::from_millis(window_ms) };
         let mut g = self.0.lock().unwrap();
+        let fresh = Bucket::new(&spec);
         let b = g.entry(key.to_string()).or_insert_with(|| Bucket::new(&spec));
-        if b.rate != Bucket::new(&spec).rate {
-            *b = Bucket::new(&spec);
+        if b.rate != fresh.rate || b.burst != fresh.burst {
+            // Go's SetLimit/SetBurst: the new limit, keeping what is owed.
+            b.rate = fresh.rate;
+            b.burst = fresh.burst;
+            b.tokens = b.tokens.min(b.burst);
         }
     }
 }
@@ -307,7 +315,7 @@ impl Client {
         query: &[(String, String)],
     ) -> Result<T, ApiErr> {
         let data = self.send(cx, "GET", path, query, None).await?;
-        serde_json::from_slice(&data).map_err(|e| ApiErr::Other(e.to_string()))
+        crate::netx::from_json(&data).map_err(|e| ApiErr::Other(e.to_string()))
     }
 
     /// A call whose reply is wrapped as `{"data": …}`.
@@ -324,7 +332,7 @@ impl Client {
             data: T,
         }
         let raw = self.send(cx, method, path, query, body).await?;
-        let e: Envelope<T> = serde_json::from_slice(&raw).map_err(|err| ApiErr::Other(err.to_string()))?;
+        let e: Envelope<T> = crate::netx::from_json(&raw).map_err(|err| ApiErr::Other(err.to_string()))?;
         Ok(e.data)
     }
 

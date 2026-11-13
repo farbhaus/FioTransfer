@@ -144,6 +144,7 @@ fn manager(stub: &Stub, tmp: &std::path::Path) -> Arc<Manager> {
         verify_delays: vec![Duration::from_millis(10)],
         change_check: Duration::from_millis(50),
         stall_limit: Duration::from_secs(5),
+        ..Tune::default()
     };
     new_tuned(Arc::new(api), store, Box::new(Settings::default), tune)
 }
@@ -194,6 +195,8 @@ fn ledger(stub: &Stub, src: &str, media_type: &str) -> Ledger {
         created_at: uploadstate::now_ms(),
         view_url: String::new(),
         media_type: media_type.to_string(),
+        pid: 0,
+        run: String::new(),
         parts: (0..2)
             .map(|i| PartState { off: (i * PART) as i64, size: PART as i64, url: format!("{}/part/{}", stub.base, i) })
             .collect(),

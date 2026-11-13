@@ -64,6 +64,10 @@ pub struct AuthManager {
     inner: Mutex<Inner>,
     client_id: Box<dyn Fn() -> String + Send + Sync>,
     static_token: bool,
+    /// One refresh at a time, as Go's `m.mu` held across `refreshLocked`. Adobe
+    /// rotates refresh tokens: a second refresh with the token the first one
+    /// just spent is refused, and a refusal clears the session.
+    refreshing: tokio::sync::Mutex<()>,
 }
 
 struct Inner {
@@ -73,7 +77,12 @@ struct Inner {
 impl AuthManager {
     pub fn new<F: Fn() -> String + Send + Sync + 'static>(client_id: F) -> Arc<Self> {
         let tok = load_token();
-        Arc::new(AuthManager { inner: Mutex::new(Inner { tok }), client_id: Box::new(client_id), static_token: false })
+        Arc::new(AuthManager {
+            inner: Mutex::new(Inner { tok }),
+            client_id: Box::new(client_id),
+            static_token: false,
+            refreshing: tokio::sync::Mutex::new(()),
+        })
     }
 
     /// A Manager with a fixed token that never refreshes (tests, debugging).
@@ -84,6 +93,7 @@ impl AuthManager {
             }),
             client_id: Box::new(String::new),
             static_token: true,
+            refreshing: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -104,7 +114,7 @@ impl AuthManager {
                 Some(_) => {}
             }
         }
-        self.refresh(cx).await?;
+        self.refresh(cx, false).await?;
         let g = self.inner.lock().unwrap();
         match &g.tok {
             Some(t) => Ok(t.access_token.clone()),
@@ -116,17 +126,32 @@ impl AuthManager {
         if self.static_token {
             return Ok(());
         }
-        self.refresh(cx).await
+        self.refresh(cx, true).await
     }
 
-    async fn refresh(&self, cx: &CancellationToken) -> Result<(), String> {
+    /// Refreshes the session. Callers queue here, one refresh at a time; one
+    /// that waited finds the token another caller just refreshed and uses it.
+    /// `forced` (after a 401) still skips a refresh when the token changed
+    /// while it waited: that 401 was for the old token.
+    async fn refresh(&self, cx: &CancellationToken, forced: bool) -> Result<(), String> {
         if self.static_token {
             return Ok(());
         }
+        let seen = self.inner.lock().unwrap().tok.as_ref().map(|t| t.access_token.clone());
+        let _turn = tokio::select! {
+            g = self.refreshing.lock() => g,
+            _ = cx.cancelled() => return Err(ERR_LOGIN_CANCELED.to_string()),
+        };
         let refresh_token = {
             let g = self.inner.lock().unwrap();
             match &g.tok {
-                Some(t) if !t.refresh_token.is_empty() => t.refresh_token.clone(),
+                Some(t) if !t.refresh_token.is_empty() => {
+                    let changed = seen.as_deref() != Some(t.access_token.as_str());
+                    if changed || (!forced && t.expires_in() > REFRESH_MARGIN) {
+                        return Ok(()); // refreshed while this caller waited
+                    }
+                    t.refresh_token.clone()
+                }
                 _ => return Err(ERR_NOT_LOGGED_IN.to_string()),
             }
         };
@@ -147,9 +172,15 @@ impl AuthManager {
             }
             Err(err) => {
                 if err == REJECTED {
-                    // The session is gone (revoked or expired): drop it so the app asks to sign in.
-                    self.inner.lock().unwrap().tok = None;
-                    clear_token();
+                    // The session is gone (revoked or expired): drop it so the
+                    // app asks to sign in — unless a sign-in replaced it while
+                    // this refresh was out.
+                    let mut g = self.inner.lock().unwrap();
+                    if g.tok.as_ref().map(|t| t.refresh_token == refresh_token).unwrap_or(false) {
+                        g.tok = None;
+                        drop(g);
+                        clear_token();
+                    }
                     return Err(ERR_NOT_LOGGED_IN.to_string());
                 }
                 Err(format!("refreshing Adobe session: {}", err))
@@ -201,7 +232,7 @@ impl AuthManager {
             #[serde(default)]
             expires_in: f64,
         }
-        let r: R = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+        let r: R = crate::netx::from_json(body.as_bytes()).map_err(|e| e.to_string())?;
         let mut exp = Duration::from_secs(r.expires_in.max(0.0) as u64);
         if r.expires_in > 1e6 {
             exp = Duration::from_millis(r.expires_in as u64);

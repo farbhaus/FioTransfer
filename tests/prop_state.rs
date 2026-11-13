@@ -69,6 +69,8 @@ fn state(source: &str, file_id: &str, sizes: &[i64], created_at: i64) -> UploadS
         created_at,
         view_url: "http://view/1".into(),
         media_type: "video/mp4".into(),
+        pid: 0,
+        run: String::new(),
         parts,
     }
 }

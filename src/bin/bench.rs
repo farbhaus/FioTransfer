@@ -114,6 +114,7 @@ fn main() {
         verify_delays: vec![Duration::from_millis(1)],
         change_check: Duration::from_secs(1),
         stall_limit: Duration::from_secs(600),
+        ..xfer_manager::Tune::default()
     };
     let m = xfer_manager::new_tuned(client, h, Box::new(move || cell.lock().unwrap().clone()), tune);
 

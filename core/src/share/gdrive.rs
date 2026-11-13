@@ -164,7 +164,7 @@ impl DriveClient {
             })
             .await?;
             if status < 300 {
-                return serde_json::from_slice(&data)
+                return crate::netx::from_json(&data)
                     .map_err(|_| "unexpected response from Google Drive".to_string());
             }
             #[derive(Debug, Default, Deserialize)]

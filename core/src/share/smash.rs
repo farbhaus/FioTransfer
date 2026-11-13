@@ -182,7 +182,7 @@ async fn smash_token(cx: &CancellationToken, stale: &str) -> Result<String, Stri
             }
             continue;
         }
-        let r: Reply = match serde_json::from_slice(&data) {
+        let r: Reply = match crate::netx::from_json(&data) {
             Ok(r) => r,
             Err(_) => return Err("unexpected response from Smash".to_string()),
         };
@@ -269,7 +269,7 @@ impl SmashClient {
             if status >= 300 {
                 return Err(self.map_error(status, &se));
             }
-            let out = serde_json::from_slice(&data)
+            let out = crate::netx::from_json(&data)
                 .map_err(|_| format!("unexpected response from Smash ({})", status))?;
             return Ok((status, out));
         }

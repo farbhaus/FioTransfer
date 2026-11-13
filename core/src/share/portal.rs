@@ -171,7 +171,7 @@ impl PortalClient {
                 }
                 return (status, Err(format!("Portal returned {}", status)));
             }
-            return match serde_json::from_slice(&data) {
+            return match crate::netx::from_json(&data) {
                 Ok(v) => (status, Ok(v)),
                 Err(_) => (status, Err("unexpected response from Portal".to_string())),
             };
@@ -188,7 +188,7 @@ impl PortalClient {
             body.insert("password".to_string(), serde_json::Value::String(self.passphrase.clone()));
         }
         let mut asked_for_email = false;
-        if let Some((name, email)) = viewer() {
+        if let Some((name, email)) = viewer().await {
             if !email.is_empty() {
                 asked_for_email = true;
                 body.insert("name".to_string(), serde_json::Value::String(name));
@@ -233,9 +233,9 @@ impl PortalClient {
 }
 
 /// viewer is who is downloading, for links that ask.
-fn viewer() -> Option<(String, String)> {
+async fn viewer() -> Option<(String, String)> {
     let f = VIEWER.lock().ok().and_then(|g| g.clone())?;
-    f()
+    f().await
 }
 
 #[async_trait::async_trait]

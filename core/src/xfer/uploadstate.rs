@@ -52,6 +52,12 @@ pub struct UploadState {
     /// wrong one: such a ledger is not resumed.
     #[serde(default)]
     pub media_type: String,
+    /// The process sending it, and its run (`Manager::run`): a ledger another
+    /// live process holds is not resumed by this one. 0 in older ledgers.
+    #[serde(default)]
+    pub pid: i64,
+    #[serde(default)]
+    pub run: String,
     pub parts: Vec<PartState>,
 }
 
@@ -241,6 +247,8 @@ mod tests {
             created_at: now,
             view_url: "http://view/1".into(),
             media_type: "video/mp4".into(),
+            pid: 0,
+            run: String::new(),
             parts: vec![
                 PartState { off: 0, size: 4, url: "http://x/0".into() },
                 PartState { off: 4, size: 4, url: "http://x/1".into() },

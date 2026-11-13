@@ -15,7 +15,12 @@ pub struct Crumb {
     pub folder_id: String,
 }
 
+/// `#[serde(default)]` on the struct: a settings.json without some key (an
+/// older or hand-edited file) keeps every other setting and takes the default
+/// for that one, as Go's json.Unmarshal over `Defaults()` did. Without it, one
+/// missing key reset every setting and the next save wrote the defaults back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// Adobe Developer Console "OAuth Single Page App" credential client ID.
     pub client_id: String,
@@ -321,7 +326,7 @@ pub fn load() -> Settings {
 fn load_unlocked() -> Settings {
     let mut s = Settings::default();
     if let Ok(b) = std::fs::read(path()) {
-        if let Ok(v) = serde_json::from_slice::<Settings>(&b) {
+        if let Ok(v) = crate::netx::from_json::<Settings>(&b) {
             s = v;
         }
     }
@@ -385,6 +390,16 @@ mod tests {
         ok.normalize();
         assert_eq!(ok.portal_every_secs, 45);
         assert_eq!(ok.portal_interval(), std::time::Duration::from_secs(45));
+    }
+
+    /// A file missing keys, or holding nulls, keeps the settings it has.
+    #[test]
+    fn a_partial_settings_file_keeps_what_it_has() {
+        let s: Settings = crate::netx::from_json(br#"{"client_id":"abc","streams":24,"download_dir":null}"#).expect("parses");
+        assert_eq!(s.client_id, "abc");
+        assert_eq!(s.streams, 24);
+        assert_eq!(s.segment_mb, 64, "a missing key takes its default");
+        assert!(!s.download_dir.is_empty(), "a null takes its default");
     }
 
     /// `portal_interval` is public, so it clamps on its own too.

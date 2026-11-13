@@ -677,33 +677,65 @@ async fn get_into(
         put_block(buf);
         return (0, status, Some(dlerr(io_msg("seek", "part file", e))));
     }
+    // A tokio File's `write_all` returns once the bytes are in its own buffer;
+    // the write itself runs on the blocking pool, and its error only shows on
+    // the next write or a flush. So a block counts as written (for the resume
+    // map, and for what this call reports) only once the next write has been
+    // accepted, which waits for it, or once the flush at the end has.
     let mut body = Body::new(resp, length);
+    let mut pending: i64 = 0; // bytes of the last block, not confirmed on disk yet
+    let mut failure: Option<DlErr> = None;
     loop {
-        if written >= length {
+        if written + pending >= length {
             break;
         }
-        let n = std::cmp::min(block - (off + written) % block, length - written) as usize;
+        let at = written + pending;
+        let n = std::cmp::min(block - (off + at) % block, length - at) as usize;
         let m = match body.read_full(&mut buf[..n]).await {
             Ok(m) => m,
             Err(e) => {
-                put_block(buf);
-                return (written, status, Some(dlerr(e)));
+                failure = Some(dlerr(e));
+                break;
             }
         };
         if m > 0 {
             if let Err(e) = fh.write_all(&buf[..m]).await {
-                put_block(buf);
-                return (written, status, Some(dlerr(format!("writing to disk: {}", os_text(&e)))));
+                // This error may be the previous block's: neither is on disk.
+                f.unwind(pending);
+                pending = 0;
+                failure = Some(dlerr(format!("writing to disk: {}", os_text(&e))));
+                break;
             }
-            written += m as i64;
+            // Accepting this block means the one before it reached the disk.
+            written += pending;
+            if pending > 0 {
+                on_block(written);
+            }
+            pending = m as i64;
             f.add(m as i64);
-            on_block(written);
         }
         if m < n {
             break;
         }
     }
     put_block(buf);
+    if pending > 0 {
+        match fh.flush().await {
+            Ok(()) => {
+                written += pending;
+                on_block(written);
+            }
+            Err(e) => {
+                f.unwind(pending);
+                if failure.is_none() {
+                    failure = Some(dlerr(format!("writing to disk: {}", os_text(&e))));
+                }
+            }
+        }
+    }
+    if let Some(e) = failure {
+        return (written, status, Some(e));
+    }
     if written < length {
         return (written, status, Some(dlerr(ERR_UNEXPECTED_EOF)));
     }

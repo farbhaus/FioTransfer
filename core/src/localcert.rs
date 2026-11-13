@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, Issuer,
+    BasicConstraints, CertificateParams, CidrSubnet, DistinguishedName, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, Issuer,
     KeyPair, KeyUsagePurpose, NameConstraints, SanType,
 };
 
@@ -31,7 +31,13 @@ fn ca_params() -> Result<CertificateParams, String> {
     p.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     p.name_constraints = Some(NameConstraints {
-        permitted_subtrees: vec![GeneralSubtree::DnsName("localhost".to_string())],
+        // As the Go app's CA: localhost and the loopback addresses only, so
+        // even its key can't sign for another site or address.
+        permitted_subtrees: vec![
+            GeneralSubtree::DnsName("localhost".to_string()),
+            GeneralSubtree::IpAddress(CidrSubnet::V4([127, 0, 0, 0], [255, 0, 0, 0])),
+            GeneralSubtree::IpAddress(CidrSubnet::V6(std::net::Ipv6Addr::LOCALHOST.octets(), [0xff; 16])),
+        ],
         excluded_subtrees: vec![],
     });
     Ok(p)
@@ -171,13 +177,35 @@ fn verify_cert(path: &str, policy: &str, host: Option<&str>) -> bool {
     matches!(c.status(), Ok(st) if st.success())
 }
 
-/// Removes a certificate an earlier build installed, then the file itself.
+/// Removes a certificate an earlier build installed (its trust setting and its
+/// keychain entry, as Go's `untrust` did), then the file itself.
 fn untrust(path: &std::path::Path) {
-    if !path.exists() {
-        return;
-    }
+    let Ok(text) = std::fs::read_to_string(path) else { return };
     let _ = std::process::Command::new("/usr/bin/security").args(["remove-trusted-cert", &path.to_string_lossy()]).status();
+    // `delete-certificate -Z` takes the SHA-1 of the DER: the name alone would
+    // also match today's CA, which carries the same one.
+    if let Some(hash) = pem_sha1(&text) {
+        let _ = std::process::Command::new("/usr/bin/security").args(["delete-certificate", "-Z", &hash]).status();
+    }
     let _ = std::fs::remove_file(path);
+}
+
+/// The SHA-1 of a PEM certificate's DER, in hex, from `/usr/bin/shasum`.
+fn pem_sha1(pem: &str) -> Option<String> {
+    use base64::Engine;
+    use std::io::Write;
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    let der = base64::engine::general_purpose::STANDARD.decode(body.trim()).ok()?;
+    let mut child = std::process::Command::new("/usr/bin/shasum")
+        .args(["-a", "1"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(&der).ok()?;
+    let out = child.wait_with_output().ok()?;
+    let hex = String::from_utf8_lossy(&out.stdout).split_whitespace().next()?.to_string();
+    (hex.len() == 40).then_some(hex)
 }
 
 #[cfg(test)]
