@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "fiotransfer"
-version = "2.1.1"
+version = "2.1.2"
 edition = "2021"
 description = "FioTransfer's command line and benchmarks, over fiotransfer-core"
 
