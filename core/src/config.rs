@@ -36,6 +36,9 @@ pub struct Settings {
     pub no_folder_logs: bool,
     /// Ask GitHub for new releases (on by default).
     pub no_update_check: bool,
+    /// ⌘Q quits (macOS). Off by default: ⌘Q hides the app, which keeps running
+    /// in the menu bar, whose Quit is the way out.
+    pub cmd_q_quits: bool,
     /// The last release a notification was shown for.
     pub update_notified: String,
 
@@ -118,6 +121,7 @@ impl Default for Settings {
             download_dir: home_dir().join("Downloads").to_string_lossy().into_owned(),
             no_folder_logs: false,
             no_update_check: false,
+            cmd_q_quits: false,
             update_notified: String::new(),
             last_account_id: String::new(),
             last_folder_id: String::new(),

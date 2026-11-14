@@ -25,6 +25,7 @@ extern "C" {
     fn fioActivate();
     fn fioHide();
     fn fioSetActive(on: c_int);
+    fn fioSetQuitHides(on: c_int);
 }
 
 /// The app's menu handler: a tag in, nothing out.
@@ -121,3 +122,13 @@ pub fn set_active(on: bool) {
 /// Tells macOS about running transfers; nothing to tell outside macOS.
 #[cfg(not(target_os = "macos"))]
 pub fn set_active(_on: bool) {}
+
+/// Whether ⌘Q hides the app (it keeps running in the menu bar) or quits.
+#[cfg(target_os = "macos")]
+pub fn set_quit_hides(on: bool) {
+    unsafe { fioSetQuitHides(i32::from(on)) };
+}
+
+/// Whether ⌘Q hides the app; there is no ⌘Q to change outside macOS.
+#[cfg(not(target_os = "macos"))]
+pub fn set_quit_hides(_on: bool) {}

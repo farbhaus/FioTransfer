@@ -88,6 +88,8 @@ pub enum Action {
     UpdateCheck(bool),
     /// "Open at login" (`SetOpenAtLogin`).
     OpenAtLogin(bool),
+    /// "Command-Q hides to menu bar": the value of `cmd_q_quits` it writes.
+    QuitHides(bool),
     /// "Check now" / "Update" (`CheckForUpdate`, `InstallUpdate`).
     UpdateClicked,
     /// "What's new": the release page.
@@ -146,7 +148,9 @@ fn ask(state: &mut UiState, action: Action) {
         }
         Action::CopyRedirect(uri) => state.ask(Request::CopyText(uri)),
         Action::ChooseDownloadFolder => state.ask(Request::PickDownloadDir),
-        Action::Streams(_) | Action::Segment(_) | Action::FolderLogs(_) => state.ask(Request::SaveSettings),
+        Action::Streams(_) | Action::Segment(_) | Action::FolderLogs(_) | Action::QuitHides(_) => {
+            state.ask(Request::SaveSettings)
+        }
         Action::UpdateCheck(on) => {
             state.ask(Request::SaveSettings);
             // Switched back on: check now, as `#auto-update` did.
@@ -223,6 +227,11 @@ pub fn show_with_actions(ui: &mut egui::Ui, state: &mut UiState) -> Option<Actio
         card(ui, |ui| {
             open_at_login_line(ui, state, &mut action);
             rule(ui);
+            // Only macOS has ⌘Q and a menu bar item to keep running in.
+            if cfg!(target_os = "macos") {
+                quit_hides_line(ui, state, &mut action);
+                rule(ui);
+            }
             version_line(ui, state, &mut action);
             // `renderUpdate` hides the auto-update row in a development build.
             if !update_line(state).is_dev() {
@@ -591,6 +600,24 @@ fn folder_logs_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<
         });
     });
     state.settings.no_folder_logs = !save_logs;
+}
+
+/// "Command-Q hides to menu bar": the same row, reading `cmd_q_quits`.
+fn quit_hides_line(ui: &mut egui::Ui, state: &mut UiState, action: &mut Option<Action>) {
+    let mut hides = !state.settings.cmd_q_quits;
+    line_with(ui, CHECK_ROW_CONTROL, |ui| {
+        ui.horizontal(|ui| {
+            let label = field_label(ui, "Command-Q hides to menu bar");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().interact_size.y = CHECK_ROW_CONTROL;
+                let boxed = ui.add(Checkbox::without_text(&mut hides)).labelled_by(label.id);
+                if boxed.changed() {
+                    *action = Some(Action::QuitHides(hides));
+                }
+            });
+        });
+    });
+    state.settings.cmd_q_quits = !hides;
 }
 
 /// "Check for updates": the same row, reading `no_update_check`.
@@ -1659,6 +1686,10 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT as _, Queryable};
 
+    /// "Command-Q hides to menu bar" is a toggle under "Open at login" on macOS
+    /// only, so every toggle after it moves down one there.
+    const MAC: usize = cfg!(target_os = "macos") as usize;
+
     fn state(settings: Settings, logged_in: bool) -> UiState {
         UiState {
             logged_in,
@@ -1898,41 +1929,32 @@ mod tests {
     }
 
     #[test]
-    fn the_three_toggles_write_their_settings() {
+    fn the_app_and_storage_toggles_write_their_settings() {
         let mut harness = screen_harness(state(Settings::default(), true));
         assert!(!harness.state().open_at_login);
+        assert!(!harness.state().settings.cmd_q_quits);
         assert!(!harness.state().settings.no_update_check);
         assert!(!harness.state().settings.no_folder_logs);
-        assert_eq!(toggle_boxes(&harness).len(), 5, "five toggle rows: the three above, and Portal's two");
+        assert_eq!(toggle_boxes(&harness).len(), 5 + MAC, "the App and Storage rows, and Portal's two");
 
-        // Open at login.
-        {
-            let boxes = toggle_boxes(&harness);
-            if let Some(boxed) = boxes.first() {
-                boxed.click();
+        let click = |harness: &mut Harness<'_, UiState>, i: usize| {
+            {
+                let boxes = toggle_boxes(harness);
+                boxes.get(i).expect("a toggle box").click();
             }
-        }
-        harness.run();
+            harness.run();
+        };
+        click(&mut harness, 0);
         assert!(harness.state().open_at_login);
-
-        // Check for updates.
-        {
-            let boxes = toggle_boxes(&harness);
-            if let Some(boxed) = boxes.get(1) {
-                boxed.click();
-            }
+        if MAC == 1 {
+            // Ticked by default: unticking makes ⌘Q quit, and saves.
+            click(&mut harness, 1);
+            assert!(harness.state().settings.cmd_q_quits);
+            assert!(harness.state().requests.contains(&Request::SaveSettings));
         }
-        harness.run();
+        click(&mut harness, 1 + MAC);
         assert!(harness.state().settings.no_update_check);
-
-        // Save log with media.
-        {
-            let boxes = toggle_boxes(&harness);
-            if let Some(boxed) = boxes.get(2) {
-                boxed.click();
-            }
-        }
-        harness.run();
+        click(&mut harness, 2 + MAC);
         assert!(harness.state().settings.no_folder_logs);
     }
 
@@ -2158,7 +2180,7 @@ mod tests {
         harness.state_mut().requests.clear();
         {
             let boxes = toggle_boxes(&harness);
-            if let Some(boxed) = boxes.get(1) {
+            if let Some(boxed) = boxes.get(1 + MAC) {
                 boxed.click();
             }
         }
@@ -2406,8 +2428,8 @@ mod tests {
         // The five toggles in draw order: Open at login, Check for updates, Save
         // log with media, and Portal's two: Include files already there, Enabled.
         let boxes = toggle_boxes(&harness);
-        assert_eq!(boxes.len(), 5, "the Portal section adds two toggles");
-        if let Some(boxed) = boxes.get(4) {
+        assert_eq!(boxes.len(), 5 + MAC, "the Portal section adds two toggles");
+        if let Some(boxed) = boxes.get(4 + MAC) {
             boxed.click();
         }
         harness.run();
@@ -2422,7 +2444,7 @@ mod tests {
         // And back off again.
         harness.state_mut().requests.clear();
         let boxes = toggle_boxes(&harness);
-        if let Some(boxed) = boxes.get(4) {
+        if let Some(boxed) = boxes.get(4 + MAC) {
             boxed.click();
         }
         harness.run();
@@ -2438,7 +2460,7 @@ mod tests {
     fn include_files_already_there_is_off_and_asks_the_app() {
         let mut harness = screen_harness(state(configured(), true));
         assert!(!harness.state().settings.portal_include_existing, "off, as in the watch editor");
-        if let Some(boxed) = toggle_boxes(&harness).get(3) {
+        if let Some(boxed) = toggle_boxes(&harness).get(3 + MAC) {
             boxed.click();
         }
         harness.run();

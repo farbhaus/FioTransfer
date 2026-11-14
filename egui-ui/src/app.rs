@@ -122,7 +122,7 @@ impl FioApp {
         // Files dropped on the window, asked for before the shell pumps so the
         // upload starts this frame.
         crate::views::drop::take(ctx, &mut self.state);
-        file_shortcuts(ctx, &mut self.state);
+        shortcuts(ctx, &mut self.state);
         // The shell goes first: requests out, answers in, the app read on its
         // tick — all before a single pixel of this frame.
         self.drive_shell(ctx);
@@ -476,6 +476,62 @@ mod tests {
         assert_eq!(toast_accent(ToastKind::Info), theme::INFO);
     }
 
+    fn keys(state: UiState) -> egui_kittest::Harness<'static, UiState> {
+        egui_kittest::Harness::builder().build_state(|ctx, state: &mut UiState| shortcuts(ctx, state), state)
+    }
+
+    #[test]
+    fn the_number_keys_and_comma_switch_screens() {
+        use crate::model::View;
+        let mut harness = keys(UiState::default());
+        for (key, view) in [
+            (egui::Key::Num3, View::History),
+            (egui::Key::Num2, View::Watch),
+            (egui::Key::Num4, View::Space),
+            (egui::Key::Comma, View::Settings),
+            (egui::Key::Num1, View::Transfers),
+        ] {
+            harness.key_press_modifiers(egui::Modifiers::COMMAND, key);
+            harness.run();
+            assert_eq!(harness.state().view, view, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn command_r_refreshes_space_only_when_its_button_would() {
+        use crate::model::{Request, View};
+        let mut harness = keys(UiState::default());
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
+        harness.run();
+        assert!(harness.state().requests.is_empty(), "not on Space");
+
+        harness.state_mut().view = View::Space;
+        harness.state_mut().space_walking = true;
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
+        harness.run();
+        assert!(harness.state().requests.is_empty(), "already walking");
+
+        harness.state_mut().space_walking = false;
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
+        harness.run();
+        assert_eq!(harness.state().requests, vec![Request::RefreshSpace]);
+    }
+
+    #[test]
+    fn command_l_goes_to_the_link_field_and_o_picks_files() {
+        use crate::model::{Request, View};
+        let mut state = UiState::default();
+        state.view = View::History;
+        let mut harness = keys(state);
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::L);
+        harness.run();
+        assert_eq!(harness.state().view, View::Transfers);
+        assert!(harness.state().focus_link);
+        harness.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::O);
+        harness.run();
+        assert_eq!(harness.state().requests, vec![Request::PickFolder], "⇧⌘O isn't also ⌘O");
+    }
+
     #[test]
     fn the_shell_geometry_is_the_stylesheets() {
         assert_eq!(PAGE_HEAD_HEIGHT, 64.0);
@@ -491,23 +547,48 @@ mod tests {
     }
 }
 
-/// The File menu's shortcuts, as the Go app's menu had them: ⌘O upload files,
-/// ⇧⌘O upload a folder, ⌘L the download link field. On macOS the native File
-/// menu (`tray_darwin.m`) owns the keys and sends the same actions; these
-/// serve the other platforms, and a menu that isn't there yet.
-fn file_shortcuts(ctx: &egui::Context, state: &mut UiState) {
+/// The keyboard shortcuts. On macOS the native menus (`tray_darwin.m`) own
+/// the keys they list and send the same actions (AppKit hands a key equivalent
+/// to the menu, never to the window), so these serve the other platforms, a
+/// menu that isn't there yet, and the keys no menu lists:
+///
+/// - ⌘O upload files, ⇧⌘O upload a folder, ⌘L the download link field (the
+///   Go app's File menu);
+/// - ⌘1–⌘4 the sidebar's screens, ⌘, Settings;
+/// - ⌘R the Space screen's Refresh (no menu item);
+/// - ⌘W closes the window (macOS: File → Close, which hides the app; ⌘Q
+///   hides it too, from a hidden app-menu item).
+fn shortcuts(ctx: &egui::Context, state: &mut UiState) {
+    use crate::model::{Request, View};
     use egui::{Key, KeyboardShortcut, Modifiers};
-    let folder = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::O);
-    let files = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
-    let link = KeyboardShortcut::new(Modifiers::COMMAND, Key::L);
+    let cmd = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
+    let pressed = |shortcut: KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(&shortcut));
     // The longer shortcut first: ⇧⌘O also matches ⌘O's keys.
-    if ctx.input_mut(|i| i.consume_shortcut(&folder)) {
-        state.ask(crate::model::Request::PickFolder);
-    } else if ctx.input_mut(|i| i.consume_shortcut(&files)) {
-        state.ask(crate::model::Request::PickFiles);
+    if pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::O)) {
+        state.ask(Request::PickFolder);
+    } else if pressed(cmd(Key::O)) {
+        state.ask(Request::PickFiles);
     }
-    if ctx.input_mut(|i| i.consume_shortcut(&link)) {
-        state.view = crate::model::View::Transfers;
+    if pressed(cmd(Key::L)) {
+        state.view = View::Transfers;
         state.focus_link = true;
+    }
+    let screens = [
+        (Key::Num1, View::Transfers),
+        (Key::Num2, View::Watch),
+        (Key::Num3, View::History),
+        (Key::Num4, View::Space),
+        (Key::Comma, View::Settings),
+    ];
+    for (key, view) in screens {
+        if pressed(cmd(key)) {
+            state.view = view;
+        }
+    }
+    if state.view == View::Space && pressed(cmd(Key::R)) {
+        crate::views::space::refresh(state);
+    }
+    if pressed(cmd(Key::W)) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }

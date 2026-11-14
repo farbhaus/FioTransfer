@@ -95,9 +95,36 @@ static NSMenuItem *fioAdd(NSMenu *m, NSString *title, int tag, NSString *key) {
 	return it;
 }
 
-// fioAppMenuAdd puts "Check for Updates…" under About in the app menu, which
-// winit builds with no way to add items, and sends its Quit (⌘Q) through the
-// app (tag 3), which asks first while transfers run. It's set before the run
+// Which item answers ⌘Q: the app menu's Quit, or a hidden one that hides the
+// app (Settings → "Command-Q hides to menu bar", on by default).
+static BOOL fioQuitHides = YES;
+static NSMenuItem *fioQuitItem, *fioQuitHideItem;
+
+static void fioApplyQuitHides(void) {
+	fioQuitItem.keyEquivalent = fioQuitHides ? @"" : @"q";
+	fioQuitHideItem.keyEquivalent = fioQuitHides ? @"q" : @"";
+}
+
+void fioSetQuitHides(int on) {
+	dispatch_async(dispatch_get_main_queue(), ^{
+		fioQuitHides = on != 0;
+		fioApplyQuitHides();
+	});
+}
+
+// fioTop puts menu in the menu bar under its title, at index at or the end.
+static void fioTop(NSMenu *main, NSMenu *menu, NSInteger at) {
+	NSMenuItem *top = [[NSMenuItem alloc] initWithTitle:menu.title action:nil keyEquivalent:@""];
+	top.submenu = menu;
+	[main insertItem:top atIndex:MIN(at, main.numberOfItems)];
+}
+
+// fioAppMenuAdd puts "Check for Updates…" and "Settings…" (⌘,) under About in
+// the app menu, which winit builds with no way to add items, adds the File,
+// View and Window menus winit doesn't make (without them ⌘W, ⌘M did nothing),
+// and sends its Quit through the app (tag 3), which asks first while transfers
+// run. ⌘Q hides the app like ⌘W, leaving it in the menu bar, unless Settings
+// says it quits (fioSetQuitHides). It's set before the run
 // loop starts, so it's normally there already; tries is how many more times to
 // look.
 static void fioAppMenuAdd(int tries) {
@@ -111,6 +138,16 @@ static void fioAppMenuAdd(int tries) {
 			q.target = fioTarget;
 			q.action = @selector(act:);
 			q.tag = 3;
+			// ⌘Q hides instead unless Settings says it quits (fioSetQuitHides):
+			// the key moves between Quit and a hidden item that hides the app.
+			fioQuitItem = q;
+			fioQuitHideItem = [[NSMenuItem alloc] initWithTitle:@"Hide to Menu Bar" action:@selector(hide:) keyEquivalent:@""];
+			fioQuitHideItem.target = NSApp;
+			fioQuitHideItem.hidden = YES;
+			fioQuitHideItem.allowsKeyEquivalentWhenHidden = YES;
+			[app insertItem:fioQuitHideItem atIndex:[app indexOfItem:q]];
+			fioApplyQuitHides();
+			break;
 		}
 	}
 	// The File menu the Go app had (main.go): uploads, the link field, the log.
@@ -123,9 +160,29 @@ static void fioAppMenuAdd(int tries) {
 		fioAdd(file, @"Download from Link…", 10, @"l");
 		[file addItem:[NSMenuItem separatorItem]];
 		fioAdd(file, @"Show Transfer Log", 11, @"");
-		NSMenuItem *top = [[NSMenuItem alloc] initWithTitle:@"File" action:nil keyEquivalent:@""];
-		top.submenu = file;
-		[main insertItem:top atIndex:MIN((NSInteger)1, main.numberOfItems)];
+		[file addItem:[NSMenuItem separatorItem]];
+		// The window's own close: winit hears windowShouldClose and the app
+		// hides, as the red button does.
+		[file addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
+		fioTop(main, file, 1);
+	}
+	// The sidebar's screens; Settings is ⌘, in the app menu.
+	if (![main itemWithTitle:@"View"]) {
+		NSMenu *view = [[NSMenu alloc] initWithTitle:@"View"];
+		fioAdd(view, @"Transfers", 13, @"1");
+		fioAdd(view, @"Watch Folders", 14, @"2");
+		fioAdd(view, @"History", 15, @"3");
+		fioAdd(view, @"Space", 16, @"4");
+		fioTop(main, view, 2);
+	}
+	if (![main itemWithTitle:@"Window"]) {
+		NSMenu *win = [[NSMenu alloc] initWithTitle:@"Window"];
+		[win addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+		[win addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
+		[win addItem:[NSMenuItem separatorItem]];
+		[win addItemWithTitle:@"Bring All to Front" action:@selector(arrangeInFront:) keyEquivalent:@""];
+		fioTop(main, win, 3);
+		NSApp.windowsMenu = win;
 	}
 	if ([app itemWithTag:6]) return;
 	NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:@"Check for Updates…" action:@selector(act:) keyEquivalent:@""];
@@ -137,6 +194,12 @@ static void fioAppMenuAdd(int tries) {
 		[app insertItem:[NSMenuItem separatorItem] atIndex:0];
 		[app insertItem:it atIndex:0];
 	}
+	NSInteger at = [app indexOfItem:it] + 1;
+	NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"Settings…" action:@selector(act:) keyEquivalent:@","];
+	settings.target = fioTarget;
+	settings.tag = 12;
+	[app insertItem:[NSMenuItem separatorItem] atIndex:at];
+	[app insertItem:settings atIndex:at + 1];
 }
 
 void fioTrayInit(void) {

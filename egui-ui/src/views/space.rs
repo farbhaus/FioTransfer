@@ -210,6 +210,22 @@ pub fn show(ui: &mut egui::Ui, state: &mut UiState) {
     }
 }
 
+/// ⌘R: what the Refresh button of the Space screen showing would do, if it's
+/// enabled (the project list's while nothing is walking, a folder's once it's
+/// listed or failed).
+pub fn refresh(state: &mut UiState) {
+    let action = match &state.space_open {
+        Some(_) => {
+            let folder = &state.space_folder;
+            (folder.listed || !folder.error.is_empty()).then_some(Action::RefreshFolder)
+        }
+        None => (!state.space_walking).then_some(Action::Refresh),
+    };
+    if let Some(action) = action {
+        ask(state, action);
+    }
+}
+
 /// What an [`Action`] asks the app for. `Refresh` walks Frame.io again;
 /// `Delete` deletes one project there, naming the account as well as the
 /// project — the same project id can exist in a second account.

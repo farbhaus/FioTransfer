@@ -331,7 +331,7 @@ impl Shell {
 
     /// The window is being closed. Answers whether the close may go ahead now.
     /// On macOS closing the window hides the app, which keeps running in the menu
-    /// bar; quitting is the menu's (or ⌘Q's) and asks first while transfers run.
+    /// bar (⌘Q too, unless Settings says it quits); quitting is a menu's Quit and asks first while transfers run.
     /// Elsewhere there is no menu bar item: it asks, and closes on the next frame
     /// if the answer is `Quit` (`Update::Quit`).
     pub fn on_close_request(&mut self) -> bool {
@@ -1008,6 +1008,7 @@ impl Shell {
         ui.logged_in = state.logged_in;
         ui.user = state.user;
         ui.settings = state.settings;
+        fiotransfer_sys::tray::set_quit_hides(!ui.settings.cmd_q_quits);
         ui.version = state.version;
         ui.open_at_login = state.open_at_login;
         ui.log_dir = state.log_dir;
@@ -1566,7 +1567,8 @@ impl Shell {
         self.focus = true;
     }
 
-    /// The menu bar item, and the app menu's Check for Updates… and Quit.
+    /// The menu bar item, the app menu's Check for Updates…, Settings… and Quit,
+    /// and the File and View menus.
     fn on_menu(&mut self, tag: i32, ui: &mut UiState) {
         match tag {
             menubar::OPEN => self.focus = true,
@@ -1610,6 +1612,11 @@ impl Shell {
                 ui.focus_link = true;
             }
             menubar::SHOW_LOG => self.handle(Request::OpenLogs, ui),
+            menubar::SETTINGS => ui.view = View::Settings,
+            menubar::VIEW_TRANSFERS => ui.view = View::Transfers,
+            menubar::VIEW_WATCH => ui.view = View::Watch,
+            menubar::VIEW_HISTORY => ui.view = View::History,
+            menubar::VIEW_SPACE => ui.view = View::Space,
             _ => {}
         }
     }

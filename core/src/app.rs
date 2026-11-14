@@ -670,6 +670,7 @@ impl App {
             cur.download_dir = s.download_dir.clone();
             cur.no_folder_logs = s.no_folder_logs;
             cur.no_update_check = s.no_update_check;
+            cur.cmd_q_quits = s.cmd_q_quits;
             // Portal: the non-secret settings only (the token is never here).
             cur.portal_url = s.portal_url.trim().trim_end_matches('/').to_string();
             cur.portal_root = s.portal_root.clone();

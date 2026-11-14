@@ -36,6 +36,13 @@ pub const UPLOAD_FILES: i32 = 8;
 pub const UPLOAD_FOLDER: i32 = 9;
 pub const FOCUS_LINK: i32 = 10;
 pub const SHOW_LOG: i32 = 11;
+/// The app menu's Settings… ⌘,.
+pub const SETTINGS: i32 = 12;
+/// The View menu: the sidebar's screens, ⌘1 to ⌘4.
+pub const VIEW_TRANSFERS: i32 = 13;
+pub const VIEW_WATCH: i32 = 14;
+pub const VIEW_HISTORY: i32 = 15;
+pub const VIEW_SPACE: i32 = 16;
 
 /// The panel's answer states (`qShowInfo` in `quick_darwin.m`).
 const QUICK_OK: i32 = 1;
@@ -303,5 +310,6 @@ mod tests {
     fn tags_match_tray_darwin_m() {
         assert_eq!((OPEN, LOGIN, QUIT, REOPEN, UPDATE, CHECK, LINK), (1, 2, 3, 4, 5, 6, 7));
         assert_eq!((UPLOAD_FILES, UPLOAD_FOLDER, FOCUS_LINK, SHOW_LOG), (8, 9, 10, 11));
+        assert_eq!((SETTINGS, VIEW_TRANSFERS, VIEW_WATCH, VIEW_HISTORY, VIEW_SPACE), (12, 13, 14, 15, 16));
     }
 }
