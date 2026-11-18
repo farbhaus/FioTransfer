@@ -92,6 +92,8 @@ pub enum Request {
     Retry(String),
     /// `ClearFinished`.
     ClearFinished,
+    /// `ClearFailed`: the failed transfers leave the queue, the rest stay.
+    ClearFailed,
     /// The job's public share link; the shell copies it and says so (`ShareLink`).
     ShareLink(String),
     /// Show a path in the file manager (`Reveal`).

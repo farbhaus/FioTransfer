@@ -467,6 +467,52 @@ proptest! {
         }
     }
 
+    /// `clear_failed` removes exactly the transfers that failed (failed, or
+    /// partial with files missing) and leaves every other one where it is, and
+    /// `failed()` is the count the menu bar item's red dot is drawn from.
+    #[test]
+    fn clear_failed_removes_exactly_the_failed_transfers(
+        ops in pvec(prop_oneof![
+            3 => (1usize..4, any::<bool>()).prop_map(|(k, term)| JobAct::Add(k, term)),
+            1 => Just(JobAct::ClearFailed),
+            2 => (0usize..12, status()).prop_map(|(k, s)| JobAct::SetLast(k, s)),
+        ], 0..18)
+    ) {
+        let e = env();
+        let mut model: Vec<(String, Status)> = Vec::new();
+        for op in &ops {
+            match *op {
+                JobAct::Add(k, term) => {
+                    for _ in 0..k {
+                        let j = e.m.new_job(if model.len() % 2 == 0 { "upload" } else { "download" });
+                        *j.title.lock().unwrap() = format!("job {}", model.len());
+                        j.set_status(if term { Status::Done } else { Status::Running });
+                        e.m.add(&j);
+                        model.push((j.id.clone(), j.status()));
+                    }
+                }
+                JobAct::ClearFailed => {
+                    e.m.clear_failed();
+                    model.retain(|(_, s)| !s.failed());
+                }
+                JobAct::SetLast(k, s) => {
+                    if !model.is_empty() {
+                        let i = k % model.len();
+                        let j = e.m.job(&model[i].0).expect("job is still listed");
+                        j.set_status(s);
+                        model[i].1 = s;
+                    }
+                }
+                _ => {}
+            }
+            let snap = e.m.snapshot();
+            let want: Vec<&String> = model.iter().rev().map(|(id, _)| id).collect();
+            let got: Vec<&String> = snap.jobs.iter().map(|v| &v.id).collect();
+            prop_assert_eq!(got, want, "clear_failed must drop only the failed ones; ops={:?}", ops);
+            prop_assert_eq!(e.m.failed(), model.iter().filter(|(_, s)| s.failed()).count());
+        }
+    }
+
     /// `prune_watch_jobs` keeps the newest `KEEP_WATCH_JOBS` finished watch
     /// batches and drops everything else it is allowed to drop.
     #[test]
@@ -518,6 +564,7 @@ enum JobAct {
     Add(usize, bool),
     AddWatch(usize, bool),
     Clear,
+    ClearFailed,
     SetLast(usize, Status),
     Prune,
 }

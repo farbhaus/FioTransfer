@@ -219,6 +219,27 @@ impl Manager {
         self.touch();
     }
 
+    /// Removes the transfers that failed from the active list, and only those: a
+    /// transfer that is still running, queued, canceled or done stays where it
+    /// is (history keeps every one of them either way).
+    pub fn clear_failed(&self) {
+        let removed = {
+            let mut jobs = self.jobs.lock().unwrap();
+            let before = jobs.len();
+            jobs.retain(|j| !j.status().failed());
+            before - jobs.len()
+        };
+        if removed > 0 {
+            self.touch();
+        }
+    }
+
+    /// How many transfers in the list failed and are waiting to be cleared, which
+    /// is what the menu bar item's red dot shows.
+    pub fn failed(&self) -> usize {
+        self.jobs.lock().unwrap().iter().filter(|j| j.status().failed()).count()
+    }
+
     /// Drops all but the newest finished watch-folder batches, so a
     /// long-running watch doesn't grow the list without end.
     pub fn prune_watch_jobs(&self) {

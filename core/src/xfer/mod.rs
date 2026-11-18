@@ -59,6 +59,13 @@ impl Status {
     pub fn terminal(&self) -> bool {
         matches!(self, Status::Done | Status::Partial | Status::Failed | Status::Canceled | Status::Skipped)
     }
+
+    /// The transfer did not deliver everything: it failed, or it finished with
+    /// files missing. `Clear failed` and the menu bar item's red dot go by this,
+    /// and it is what the row offers Retry for.
+    pub fn failed(&self) -> bool {
+        matches!(self, Status::Failed | Status::Partial)
+    }
 }
 
 impl std::fmt::Display for Status {
@@ -524,6 +531,11 @@ impl JobView {
     /// Done, one way or another: `status.terminal()`.
     pub fn terminal(&self) -> bool {
         self.status.terminal()
+    }
+
+    /// It did not deliver everything: `status.failed()`.
+    pub fn failed(&self) -> bool {
+        self.status.failed()
     }
 
     /// 0.0–1.0, or `None` while the size isn't known yet.
