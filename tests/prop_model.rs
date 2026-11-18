@@ -513,6 +513,61 @@ proptest! {
         }
     }
 
+    /// `ignore` takes exactly the named failed transfer out of the "waiting to
+    /// be resolved" count — the menu bar item's dot — and leaves it in the list;
+    /// it does nothing to a transfer that did not fail. `clear_failed` still
+    /// takes the ignored ones, and `done` ones are never counted either way.
+    #[test]
+    fn ignoring_a_failure_takes_it_out_of_the_count_but_not_the_list(
+        ops in pvec(prop_oneof![
+            3 => (1usize..4, status()).prop_map(|(k, s)| JobAct::AddStatus(k, s)),
+            2 => (0usize..12).prop_map(JobAct::Ignore),
+            1 => Just(JobAct::ClearFailed),
+        ], 1..16)
+    ) {
+        let e = env();
+        let mut model: Vec<(String, Status, bool)> = Vec::new(); // id, status, ignored
+        for op in &ops {
+            match *op {
+                JobAct::AddStatus(k, st) => {
+                    for _ in 0..k {
+                        let j = e.m.new_job("download");
+                        j.set_status(st);
+                        e.m.add(&j);
+                        model.push((j.id.clone(), st, false));
+                    }
+                }
+                JobAct::Ignore(k) => {
+                    let Some((id, st, ignored)) = model.get(k % model.len().max(1)).cloned() else { continue };
+                    let want = st.failed() && !ignored;
+                    prop_assert_eq!(e.m.ignore(&id), want, "ignore reports what it changed");
+                    prop_assert_eq!(e.m.ignore(&id), false, "ignoring twice changes nothing");
+                    if let Some(entry) = model.iter_mut().find(|(i, _, _)| *i == id) {
+                        if st.failed() {
+                            entry.2 = true;
+                        }
+                    }
+                }
+                JobAct::ClearFailed => {
+                    e.m.clear_failed();
+                    model.retain(|(_, st, _)| !st.failed());
+                }
+                _ => {}
+            }
+            let snap = e.m.snapshot();
+            let want: Vec<&String> = model.iter().rev().map(|(id, _, _)| id).collect();
+            let got: Vec<&String> = snap.jobs.iter().map(|v| &v.id).collect();
+            prop_assert_eq!(got, want, "ignoring must not remove anything; ops={:?}", ops);
+            prop_assert_eq!(e.m.failed(), model.iter().filter(|(_, st, ig)| st.failed() && !*ig).count());
+            // The view carries the flag the front end reads.
+            for v in &snap.jobs {
+                let (_, _, ig) = model.iter().find(|(id, _, _)| *id == v.id).expect("listed");
+                prop_assert_eq!(v.ignored, *ig, "the snapshot says which failures are ignored");
+                prop_assert_eq!(v.unresolved(), v.failed() && !v.ignored);
+            }
+        }
+    }
+
     /// `prune_watch_jobs` keeps the newest `KEEP_WATCH_JOBS` finished watch
     /// batches and drops everything else it is allowed to drop.
     #[test]
@@ -565,6 +620,9 @@ enum JobAct {
     AddWatch(usize, bool),
     Clear,
     ClearFailed,
+    Ignore(usize),
+    /// A job added straight into the given status.
+    AddStatus(usize, Status),
     SetLast(usize, Status),
     Prune,
 }

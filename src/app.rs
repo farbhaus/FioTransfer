@@ -124,6 +124,7 @@ pub async fn dispatch(app: Arc<App>, method: &str, args: Vec<Value>) -> Result<V
             app.clear_failed();
             ok(Value::Null)
         }
+        "IgnoreFailed" => ok(app.ignore_failed(&s(&args, 0))),
         "Snapshot" => ok(app.snapshot()),
         "JobFiles" => ok(app.job_files(&s(&args, 0))),
         "Retry" => ok(app.retry(&s(&args, 0), &s(&args, 1)).await?),

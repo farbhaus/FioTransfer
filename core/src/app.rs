@@ -1033,6 +1033,12 @@ impl App {
         }
     }
 
+    /// `IgnoreFailed`: one failed transfer is marked as seen, so it stops being
+    /// counted as an error but stays in the list.
+    pub fn ignore_failed(&self, id: &str) -> bool {
+        self.mgr().map(|m| m.ignore(id)).unwrap_or(false)
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.mgr().map(|m| m.snapshot()).unwrap_or_default()
     }

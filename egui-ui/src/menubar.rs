@@ -150,6 +150,7 @@ async fn menu_loop(app: Arc<App>) {
         let (up, down, active) = app.mgr().map(|m| m.activity()).unwrap_or((0.0, 0.0, 0));
         // Transfers that failed and are still in the queue: the icon carries a
         // red dot while this is not zero, and the status line says how many.
+        // Failed transfers nobody has ignored: the icon's red dot and the count.
         let failed = app.mgr().map(|m| m.failed()).unwrap_or(0);
         let (status, title) = status_line(up, down, active, failed);
         tray::tray_set(&status, &title, login, &update_title(&app.update_status()), failed);

@@ -36,6 +36,8 @@ pub enum Icon {
     Sliders,
     /// The Space mark.
     Donut,
+    /// A failed transfer the user has seen: `Ignore`.
+    EyeOff,
 }
 
 /// One `<path>`: its data, `stroke-width`, and whether its caps and joins are
@@ -132,6 +134,12 @@ fn parts(icon: Icon) -> &'static [Part] {
             part("M7.8 10a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0-4.4 0z", 1.5, false, false),
         ],
         Icon::Clock => icon![part("M3.5 10a6.5 6.5 0 1 0 1.9-4.6M3.5 4v3.4h3.4M10 6.5V10l2.5 1.6", 1.5, true, true)],
+        // The eye, closed: the same lids with a slash through them.
+        Icon::EyeOff => icon![
+            part("M2.5 10s2.7-5 7.5-5 7.5 5 7.5 5-2.7 5-7.5 5-7.5-5-7.5-5z", 1.5, false, true),
+            part("M7.8 10a2.2 2.2 0 1 0 4.4 0a2.2 2.2 0 1 0-4.4 0z", 1.5, false, false),
+            part("M4 16L16 4", 1.5, true, false),
+        ],
         // Two rails, and the knobs <circle cx="13" cy="6" r="2"/>, <circle cx="7" cy="14" r="2"/>.
         Icon::Sliders => icon![
             part("M4 6h7m4 0h1M4 14h1m4 0h7", 1.5, true, false),
@@ -461,7 +469,7 @@ fn arc(sub: &mut Sub, p0: Pos2, rx: f32, ry: f32, rot_deg: f32, large: bool, swe
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 23] = [
+    const ALL: [Icon; 24] = [
         Icon::Up,
         Icon::Down,
         Icon::Sync,
@@ -485,6 +493,7 @@ mod tests {
         Icon::Clock,
         Icon::Sliders,
         Icon::Donut,
+        Icon::EyeOff,
     ];
 
     fn close(a: Pos2, b: Pos2) -> bool {
