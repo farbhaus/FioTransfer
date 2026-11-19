@@ -350,7 +350,7 @@ fn every_method_answers_every_shaped_argument_list() {
 /// `Search` is not here: a non-empty account makes it ask Frame.io.)
 const LOCAL_OK: &[&str] = &[
     "GetState", "SaveSettings", "Logout", "Snapshot", "UpdateStatus", "CheckForUpdate", "Cancel",
-    "ClearFinished", "JobFiles", "History", "HistoryFiles", "Watches", "RemoveWatch",
+    "ClearFinished", "ClearFailed", "IgnoreFailed", "Remove", "JobFiles", "History", "HistoryFiles", "Watches", "RemoveWatch",
     "RequeueCanceled", "SetWatchEnabled", "SetUploadDestination", "TakeServiceRequests",
     "ClipboardText", "PickFiles", "PickFolder", "PickWatchFolder", "PickDownloadDir",
     "ExportHistory", "__clipboard_set", "__quit", "__window_show",

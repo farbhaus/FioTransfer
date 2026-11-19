@@ -148,8 +148,12 @@ async fn menu_loop(app: Arc<App>) {
         }
         tray::sync_dock();
         let (up, down, active) = app.mgr().map(|m| m.activity()).unwrap_or((0.0, 0.0, 0));
-        let (status, title) = status_line(up, down, active);
-        tray::tray_set(&status, &title, login, &update_title(&app.update_status()));
+        // Failed transfers nobody has ignored (a retried one has left the
+        // queue): the icon carries a red dot while this is not zero, and the
+        // status line says how many.
+        let failed = app.mgr().map(|m| m.unresolved()).unwrap_or(0);
+        let (status, title) = status_line(up, down, active, failed);
+        tray::tray_set(&status, &title, login, &update_title(&app.update_status()), failed);
         let jobs = if active > 0 { menu_jobs(&app.snapshot()) } else { r#"{"jobs":[],"more":0}"#.to_string() };
         if jobs != shown {
             tray::tray_jobs(&jobs);
@@ -160,23 +164,27 @@ async fn menu_loop(app: Arc<App>) {
 }
 
 /// The menu's status line and the text next to the icon.
-fn status_line(up: f64, down: f64, active: usize) -> (String, String) {
-    if active == 0 {
-        return ("Idle".to_string(), String::new());
+///
+/// "Idle", or "2 active", then how many failed transfers are unresolved — the
+/// icon's red dot in words — then the speeds, which are also the text next to
+/// the icon.
+fn status_line(up: f64, down: f64, active: usize, failed: usize) -> (String, String) {
+    let mut parts = vec![if active == 0 { "Idle".to_string() } else { format!("{} active", active) }];
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
     }
-    let mut parts = Vec::new();
+    let mut speeds = Vec::new();
     if up > 0.0 {
-        parts.push(format!("↑ {}", speed(up)));
+        speeds.push(format!("↑ {}", speed(up)));
     }
     if down > 0.0 {
-        parts.push(format!("↓ {}", speed(down)));
+        speeds.push(format!("↓ {}", speed(down)));
     }
-    let title = parts.join("  ");
-    let mut status = format!("{} active", active);
+    let title = speeds.join("  ");
     if !title.is_empty() {
-        status = format!("{} · {}", status, title);
+        parts.push(title.clone());
     }
-    (status, title)
+    (parts.join(" · "), title)
 }
 
 /// "Update to X…" while an update is available, else "" (Check for Updates…).
@@ -255,12 +263,23 @@ mod tests {
 
     #[test]
     fn the_status_line_reads_like_the_go_apps() {
-        assert_eq!(status_line(0.0, 0.0, 0), ("Idle".to_string(), String::new()));
+        assert_eq!(status_line(0.0, 0.0, 0, 0), ("Idle".to_string(), String::new()));
         assert_eq!(
-            status_line(116e6, 2.5e9, 2),
+            status_line(116e6, 2.5e9, 2, 0),
             ("2 active · ↑ 116 MB/s  ↓ 2.5 GB/s".to_string(), "↑ 116 MB/s  ↓ 2.5 GB/s".to_string())
         );
-        assert_eq!(status_line(0.0, 0.0, 1).0, "1 active");
+        assert_eq!(status_line(0.0, 0.0, 1, 0).0, "1 active");
+    }
+
+    #[test]
+    fn the_status_line_counts_the_transfers_that_failed() {
+        // The red dot in words: the count sits after what is running, before the
+        // speeds, and it is there when nothing else is.
+        assert_eq!(status_line(0.0, 0.0, 0, 1), ("Idle · 1 failed".to_string(), String::new()));
+        assert_eq!(
+            status_line(116e6, 0.0, 1, 2),
+            ("1 active · 2 failed · ↑ 116 MB/s".to_string(), "↑ 116 MB/s".to_string())
+        );
     }
 
     #[test]

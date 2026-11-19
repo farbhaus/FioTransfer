@@ -1026,6 +1026,24 @@ impl App {
         }
     }
 
+    /// `ClearFailed`: the failed transfers leave the queue, the rest stay.
+    pub fn clear_failed(&self) {
+        if let Some(m) = self.mgr() {
+            m.clear_failed();
+        }
+    }
+
+    /// `Remove`: one finished transfer leaves the queue (History keeps it).
+    pub fn remove(&self, id: &str) -> bool {
+        self.mgr().map(|m| m.remove(id)).unwrap_or(false)
+    }
+
+    /// `IgnoreFailed`: one failed transfer is marked as seen, so it stops being
+    /// counted as an error but stays in the list.
+    pub fn ignore_failed(&self, id: &str) -> bool {
+        self.mgr().map(|m| m.ignore(id)).unwrap_or(false)
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.mgr().map(|m| m.snapshot()).unwrap_or_default()
     }

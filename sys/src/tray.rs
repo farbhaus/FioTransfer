@@ -19,7 +19,13 @@ use crate::strings::cstr;
 #[cfg(target_os = "macos")]
 extern "C" {
     fn fioTrayInit();
-    fn fioTraySet(status: *const std::ffi::c_char, title: *const std::ffi::c_char, login: c_int, update: *const std::ffi::c_char);
+    fn fioTraySet(
+        status: *const std::ffi::c_char,
+        title: *const std::ffi::c_char,
+        login: c_int,
+        update: *const std::ffi::c_char,
+        failed: c_int,
+    );
     fn fioTrayJobs(json: *const std::ffi::c_char);
     fn fioSyncDock();
     fn fioActivate();
@@ -61,15 +67,19 @@ pub fn tray_init() {}
 /// The menu's status line, the text next to the icon, the "Open at Login"
 /// state and the update item (an empty `update` shows "Check for Updates…"
 /// instead).
+///
+/// `failed` is how many failed transfers in the queue nobody has ignored: while
+/// it is not zero the icon carries a red dot (see `mac/tray_darwin.m`).
 #[cfg(target_os = "macos")]
-pub fn tray_set(status: &str, title: &str, login: bool, update: &str) {
+pub fn tray_set(status: &str, title: &str, login: bool, update: &str, failed: usize) {
     let (cs, ct, cu): (CString, CString, CString) = (cstr(status), cstr(title), cstr(update));
-    unsafe { fioTraySet(cs.as_ptr(), ct.as_ptr(), i32::from(login), cu.as_ptr()) };
+    let failed = i32::try_from(failed).unwrap_or(i32::MAX);
+    unsafe { fioTraySet(cs.as_ptr(), ct.as_ptr(), i32::from(login), cu.as_ptr(), failed) };
 }
 
 /// The menu's status line and update item; nothing to do outside macOS.
 #[cfg(not(target_os = "macos"))]
-pub fn tray_set(_status: &str, _title: &str, _login: bool, _update: &str) {}
+pub fn tray_set(_status: &str, _title: &str, _login: bool, _update: &str, _failed: usize) {}
 
 /// The running transfers, as the JSON the menu draws.
 #[cfg(target_os = "macos")]

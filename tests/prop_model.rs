@@ -467,6 +467,184 @@ proptest! {
         }
     }
 
+    /// `clear_failed` removes exactly the transfers that failed (failed, or
+    /// partial with files missing) and leaves every other one where it is, and
+    /// `unresolved()` is the count the menu bar item's red dot is drawn from.
+    #[test]
+    fn clear_failed_removes_exactly_the_failed_transfers(
+        ops in pvec(prop_oneof![
+            3 => (1usize..4, any::<bool>()).prop_map(|(k, term)| JobAct::Add(k, term)),
+            1 => Just(JobAct::ClearFailed),
+            2 => (0usize..12, status()).prop_map(|(k, s)| JobAct::SetLast(k, s)),
+        ], 0..18)
+    ) {
+        let e = env();
+        let mut model: Vec<(String, Status)> = Vec::new();
+        for op in &ops {
+            match *op {
+                JobAct::Add(k, term) => {
+                    for _ in 0..k {
+                        let j = e.m.new_job(if model.len() % 2 == 0 { "upload" } else { "download" });
+                        *j.title.lock().unwrap() = format!("job {}", model.len());
+                        j.set_status(if term { Status::Done } else { Status::Running });
+                        e.m.add(&j);
+                        model.push((j.id.clone(), j.status()));
+                    }
+                }
+                JobAct::ClearFailed => {
+                    e.m.clear_failed();
+                    model.retain(|(_, s)| !s.failed());
+                }
+                JobAct::SetLast(k, s) => {
+                    if !model.is_empty() {
+                        let i = k % model.len();
+                        let j = e.m.job(&model[i].0).expect("job is still listed");
+                        j.set_status(s);
+                        model[i].1 = s;
+                    }
+                }
+                _ => {}
+            }
+            let snap = e.m.snapshot();
+            let want: Vec<&String> = model.iter().rev().map(|(id, _)| id).collect();
+            let got: Vec<&String> = snap.jobs.iter().map(|v| &v.id).collect();
+            prop_assert_eq!(got, want, "clear_failed must drop only the failed ones; ops={:?}", ops);
+            prop_assert_eq!(e.m.unresolved(), model.iter().filter(|(_, s)| s.failed()).count());
+        }
+    }
+
+    /// `ignore` takes exactly the named failed transfer out of the "waiting to
+    /// be resolved" count — the menu bar item's dot — and leaves it in the list;
+    /// it does nothing to a transfer that did not fail. `clear_failed` still
+    /// takes the ignored ones, and `done` ones are never counted either way.
+    #[test]
+    fn ignoring_a_failure_takes_it_out_of_the_count_but_not_the_list(
+        ops in pvec(prop_oneof![
+            3 => (1usize..4, status()).prop_map(|(k, s)| JobAct::AddStatus(k, s)),
+            2 => (0usize..12).prop_map(JobAct::Ignore),
+            1 => Just(JobAct::ClearFailed),
+        ], 1..16)
+    ) {
+        let e = env();
+        let mut model: Vec<(String, Status, bool)> = Vec::new(); // id, status, ignored
+        for op in &ops {
+            match *op {
+                JobAct::AddStatus(k, st) => {
+                    for _ in 0..k {
+                        let j = e.m.new_job("download");
+                        j.set_status(st);
+                        e.m.add(&j);
+                        model.push((j.id.clone(), st, false));
+                    }
+                }
+                JobAct::Ignore(k) => {
+                    let Some((id, st, ignored)) = model.get(k % model.len().max(1)).cloned() else { continue };
+                    let want = st.failed() && !ignored;
+                    prop_assert_eq!(e.m.ignore(&id), want, "ignore reports what it changed");
+                    prop_assert_eq!(e.m.ignore(&id), false, "ignoring twice changes nothing");
+                    if let Some(entry) = model.iter_mut().find(|(i, _, _)| *i == id) {
+                        if st.failed() {
+                            entry.2 = true;
+                        }
+                    }
+                }
+                JobAct::ClearFailed => {
+                    e.m.clear_failed();
+                    model.retain(|(_, st, _)| !st.failed());
+                }
+                _ => {}
+            }
+            let snap = e.m.snapshot();
+            let want: Vec<&String> = model.iter().rev().map(|(id, _, _)| id).collect();
+            let got: Vec<&String> = snap.jobs.iter().map(|v| &v.id).collect();
+            prop_assert_eq!(got, want, "ignoring must not remove anything; ops={:?}", ops);
+            prop_assert_eq!(e.m.unresolved(), model.iter().filter(|(_, st, ig)| st.failed() && !*ig).count());
+            // The view carries the flag the front end reads.
+            for v in &snap.jobs {
+                let (_, _, ig) = model.iter().find(|(id, _, _)| *id == v.id).expect("listed");
+                prop_assert_eq!(v.ignored, *ig, "the snapshot says which failures are ignored");
+                prop_assert_eq!(v.unresolved(), v.failed() && !*ig);
+            }
+        }
+    }
+
+    /// A watch folder retries what failed in a later batch of its own. The
+    /// earlier batch leaves the queue, as a retried transfer does, once later
+    /// batches of the same watch have tried every file it did not deliver — whatever became of them,
+    /// since a later batch that failed them asks for itself. Files are matched
+    /// by direction and path, and only within one watch.
+    ///
+    /// The oracle replays the batches over plain sets: each failed batch owes the
+    /// files it did not deliver (and a batch that failed before it listed any
+    /// owes nothing, so the next batch of its watch answers it); every batch that
+    /// finishes later crosses off what it tried.
+    #[test]
+    fn a_watch_batch_leaves_the_queue_once_later_batches_try_every_file_it_missed(
+        batches in pvec(
+            (0u8..2, any::<bool>(), pvec((0u8..4, prop_oneof![
+                Just(Status::Done), Just(Status::Failed), Just(Status::Skipped), Just(Status::Canceled)
+            ]), 0..4), any::<bool>()),
+            1..8,
+        )
+    ) {
+        use std::collections::HashSet;
+        struct Seen { id: String, watch: u8, failed: bool, owed: HashSet<String>, retried: bool }
+        let e = env();
+        let mut model: Vec<Seen> = Vec::new();
+        for (watch, upload, files, fail_whole) in &batches {
+            let kind = if *upload { "upload" } else { "download" };
+            let j = e.m.new_job(kind);
+            *j.watch_id.lock().unwrap() = format!("w{watch}");
+            let list: Vec<Arc<File>> = files
+                .iter()
+                .enumerate()
+                .map(|(i, (n, _))| {
+                    let name = format!("f{n}.mov");
+                    let f = Arc::new(File::new(i, &name, &name, &format!("/tmp/{name}"), 1));
+                    f.attach(&j);
+                    f
+                })
+                .collect();
+            j.set_files(list.clone());
+            j.set_status(Status::Running);
+            for (f, (_, st)) in list.iter().zip(files) {
+                f.set_status(*st, "");
+            }
+            if *fail_whole {
+                j.fail("boom");
+            }
+            e.m.add(&j);
+            e.rt.block_on(async { j.finish().await });
+
+            // The oracle.
+            let key = |n: &u8| format!("{kind}:f{n}.mov");
+            let tried: HashSet<String> = files.iter().map(|(n, _)| key(n)).collect();
+            for earlier in model.iter_mut() {
+                if earlier.watch == *watch && earlier.failed && !earlier.retried {
+                    earlier.owed.retain(|k| !tried.contains(k));
+                    earlier.retried = earlier.owed.is_empty();
+                }
+            }
+            let owed: HashSet<String> = files
+                .iter()
+                .filter(|(_, st)| !matches!(st, Status::Done | Status::Skipped))
+                .map(|(n, _)| key(n))
+                .collect();
+            model.push(Seen { id: j.id.clone(), watch: *watch, failed: j.status().failed(), owed, retried: false });
+
+            // Nothing is pruned below KEEP_WATCH_JOBS, so a batch is listed
+            // exactly when it has not been answered by a later one.
+            for seen in &model {
+                prop_assert_eq!(e.m.job(&seen.id).is_some(), !seen.retried, "batches={:?}", batches);
+            }
+            prop_assert_eq!(
+                e.m.unresolved(),
+                model.iter().filter(|s| s.failed && !s.retried).count(),
+                "batches={:?}", batches
+            );
+        }
+    }
+
     /// `prune_watch_jobs` keeps the newest `KEEP_WATCH_JOBS` finished watch
     /// batches and drops everything else it is allowed to drop.
     #[test]
@@ -518,6 +696,10 @@ enum JobAct {
     Add(usize, bool),
     AddWatch(usize, bool),
     Clear,
+    ClearFailed,
+    Ignore(usize),
+    /// A job added straight into the given status.
+    AddStatus(usize, Status),
     SetLast(usize, Status),
     Prune,
 }
@@ -926,4 +1108,111 @@ fn eta_is_never_negative_even_when_progress_overshoots() {
     assert!(v.eta.is_finite(), "eta {}", v.eta);
     assert!(v.eta >= 0.0, "eta {} with done {} > total {}", v.eta, v.done, v.total);
     assert!(v.avg_speed.is_finite() && v.avg_speed >= 0.0, "avg_speed {}", v.avg_speed);
+}
+
+// ---------- resolving a failure by retrying it ----------
+
+/// A failed upload in the queue with one file left to send, recorded in
+/// history as `retry` finds it. The file has a remote parent, so the retry
+/// never needs Frame.io to make a folder: it stays offline.
+fn failed_upload(e: &Env, file_status: &str) -> Arc<Job> {
+    let j = e.m.new_job("upload");
+    *j.title.lock().unwrap() = "Reel".to_string();
+    j.set_status(Status::Failed);
+    e.m.add(&j);
+    let file = history::File {
+        transfer_id: j.id.clone(),
+        idx: 0,
+        rel_path: "a.mov".to_string(),
+        local_path: e.dir.path().join("missing/a.mov").to_string_lossy().into_owned(),
+        size: 10,
+        status: file_status.to_string(),
+        remote_parent: "folder-1".to_string(),
+        ..Default::default()
+    };
+    e.m.hist.start(&j.record(), &[file]).expect("history");
+    j
+}
+
+#[test]
+fn a_retry_that_starts_takes_the_place_of_the_row_it_came_from() {
+    let e = env();
+    let j = failed_upload(&e, "failed");
+    assert_eq!(e.m.unresolved(), 1);
+
+    let new = e.rt.block_on(e.m.retry(&j.id, "")).expect("the retry starts").expect("a new job");
+    assert_ne!(new.id, j.id);
+    // The old row has left the queue and the new one stands in its place;
+    // History keeps both attempts.
+    let listed: Vec<String> = e.m.snapshot().jobs.into_iter().map(|v| v.id).collect();
+    assert_eq!(listed, vec![new.id.clone()]);
+    assert!(e.m.hist.get(&j.id).expect("history").is_some());
+    assert!(e.m.hist.get(&new.id).expect("history").is_some());
+
+    // The new attempt speaks for itself: this one fails too (its file is
+    // missing), and it is the one the dot counts now.
+    e.rt.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !new.status().terminal() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the retry finishes")
+    });
+    assert!(new.status().failed(), "{}", new.status());
+    assert_eq!(e.m.unresolved(), 1);
+    // Retrying the retry: still one "Retry:" in the title, not one per attempt,
+    // and again only the newest attempt is listed.
+    assert_eq!(*new.title.lock().unwrap(), "Retry: Reel");
+    let again = e.rt.block_on(e.m.retry(&new.id, "")).expect("the retry starts").expect("a new job");
+    assert_eq!(*again.title.lock().unwrap(), "Retry: Reel");
+    let listed: Vec<String> = e.m.snapshot().jobs.into_iter().map(|v| v.id).collect();
+    assert_eq!(listed, vec![again.id.clone()]);
+}
+
+#[test]
+fn remove_takes_one_finished_transfer_and_never_a_running_one() {
+    let e = env();
+    let done = e.m.new_job("upload");
+    done.set_status(Status::Done);
+    e.m.add(&done);
+    let running = e.m.new_job("upload");
+    running.set_status(Status::Running);
+    e.m.add(&running);
+    let failed = failed_upload(&e, "failed");
+
+    assert!(!e.m.remove(&running.id), "Cancel is for a running transfer");
+    assert!(!e.m.remove("no-such-id"));
+    assert!(e.m.remove(&done.id));
+    assert!(!e.m.remove(&done.id), "it is already gone");
+    assert!(e.m.remove(&failed.id));
+    let left: Vec<String> = e.m.snapshot().jobs.into_iter().map(|v| v.id).collect();
+    assert_eq!(left, vec![running.id.clone()]);
+    assert_eq!(e.m.unresolved(), 0);
+    // History keeps what left the queue.
+    assert!(e.m.hist.get(&failed.id).expect("history").is_some());
+}
+
+#[test]
+fn a_retry_that_cannot_start_leaves_the_failure_asking() {
+    let e = env();
+    // Every file already finished: there is nothing to retry.
+    let j = failed_upload(&e, "done");
+    assert!(e.rt.block_on(e.m.retry(&j.id, "")).is_err());
+    assert!(e.m.job(&j.id).is_some(), "the row stays");
+    assert!(j.unresolved());
+    assert_eq!(e.m.unresolved(), 1);
+}
+
+#[test]
+fn an_ignored_failure_can_still_be_retried() {
+    let e = env();
+    let j = failed_upload(&e, "failed");
+    assert!(e.m.ignore(&j.id));
+    assert!(!e.m.ignore(&j.id), "ignoring twice is one change");
+    assert_eq!(e.m.unresolved(), 0);
+    let new = e.rt.block_on(e.m.retry(&j.id, "")).expect("the retry starts").expect("a new job");
+    let listed: Vec<String> = e.m.snapshot().jobs.into_iter().map(|v| v.id).collect();
+    assert_eq!(listed, vec![new.id.clone()], "the retry takes the ignored row's place too");
 }

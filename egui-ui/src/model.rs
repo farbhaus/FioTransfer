@@ -92,6 +92,13 @@ pub enum Request {
     Retry(String),
     /// `ClearFinished`.
     ClearFinished,
+    /// `ClearFailed`: the failed transfers leave the queue, the rest stay.
+    ClearFailed,
+    /// `IgnoreFailed`: this failed transfer is seen, so it stops asking for
+    /// attention (the other way to resolve one is `Retry`).
+    IgnoreFailed(String),
+    /// `Remove`: this finished transfer leaves the queue; History keeps it.
+    Remove(String),
     /// The job's public share link; the shell copies it and says so (`ShareLink`).
     ShareLink(String),
     /// Show a path in the file manager (`Reveal`).
