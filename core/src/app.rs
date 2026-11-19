@@ -1026,6 +1026,13 @@ impl App {
         }
     }
 
+    /// `ClearFailed`: the failed transfers leave the queue, the rest stay.
+    pub fn clear_failed(&self) {
+        if let Some(m) = self.mgr() {
+            m.clear_failed();
+        }
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.mgr().map(|m| m.snapshot()).unwrap_or_default()
     }

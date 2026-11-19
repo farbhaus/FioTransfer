@@ -55,6 +55,9 @@ use crate::theme::{self, size, space};
 const HEAD_H: f32 = size::HEAD_H;
 /// `.list { margin-top: 20px }`
 const LIST_GAP: f32 = space::HUGE;
+/// The space between two buttons of `.head-actions`, which has no gap of its own
+/// (the webview had one button there).
+const HEAD_ACTION_GAP: f32 = space::S;
 /// `.list-head { height: 32px }`
 const LIST_HEAD_H: f32 = size::LIST_HEAD_H;
 /// `.row-main { min-height: 56px }`, `.row { padding: 0 12px }`
@@ -458,6 +461,9 @@ pub enum Action {
     StartDownload { link: String, passphrase: String, subfolder: bool },
     /// `.head-actions`' "Clear finished".
     ClearFinished,
+    /// `.head-actions`' "Clear failed": the failed transfers leave the queue, and
+    /// the transfers still running, queued or done stay.
+    ClearFailed,
     /// `.comp-body`'s "Files…" (`PickFiles`): a panel, then the upload starts.
     PickFiles,
     /// `.comp-body`'s "Folder…" (`PickFolder`).
@@ -625,7 +631,13 @@ fn preview_line(info: &LinkInfo) -> String {
 
 // ---------- `.page-head` ----------
 
-/// `.page-head`: the title, and `.head-actions` pinned right with "Clear finished".
+/// `.page-head`: the title, and `.head-actions` pinned right with "Clear failed"
+/// and "Clear finished".
+///
+/// Each button is only drawn while it has something to take, as
+/// `$('#clear-btn').classList.toggle('hidden', !jobs.some(terminal))` does: a
+/// queue with nothing finished has neither, and one with nothing failed has only
+/// "Clear finished".
 fn head(ui: &mut Ui, state: &mut UiState) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, HEAD_H), Sense::hover());
@@ -639,17 +651,25 @@ fn head(ui: &mut Ui, state: &mut UiState) {
         theme::TEXT,
     );
 
-    // `$('#clear-btn').classList.toggle('hidden', !jobs.some(terminal))`
-    if state.snapshot.jobs.iter().any(|job| job.terminal()) {
-        let label = "Clear finished";
-        let w = text_width(ui, label, T_BODY) + 24.0;
-        let button_rect = Rect::from_center_size(
-            pos2(rect.right() - w / 2.0, rect.center().y),
-            vec2(w, size::CONTROL_H),
-        );
-        if subtle_button(ui, button_rect, label).clicked() {
-            report(state, Action::ClearFinished);
+    let jobs = &state.snapshot.jobs;
+    let actions = [
+        (jobs.iter().any(|job| job.failed()), "Clear failed", Action::ClearFailed),
+        (jobs.iter().any(|job| job.terminal()), "Clear finished", Action::ClearFinished),
+    ];
+    // Laid out from the right edge inwards, so "Clear finished" keeps the corner
+    // it has always had and "Clear failed" grows to its left.
+    let mut right = rect.right();
+    for (shown, label, action) in actions.iter().rev() {
+        if !*shown {
+            continue;
         }
+        let w = text_width(ui, label, T_BODY) + 24.0;
+        let button_rect =
+            Rect::from_center_size(pos2(right - w / 2.0, rect.center().y), vec2(w, size::CONTROL_H));
+        if subtle_button(ui, button_rect, label).clicked() {
+            report(state, action.clone());
+        }
+        right -= w + HEAD_ACTION_GAP;
     }
     // A `put` at an absolute rect rewinds the cursor to that rect, so the head
     // states its own height at the end.
@@ -1653,6 +1673,7 @@ fn report(state: &mut UiState, action: Action) {
             state.link_info = None;
         }
         Action::ClearFinished => state.ask(Request::ClearFinished),
+        Action::ClearFailed => state.ask(Request::ClearFailed),
         Action::PickFiles => state.ask(Request::PickFiles),
         Action::PickFolder => state.ask(Request::PickFolder),
         Action::Paste => state.ask(Request::Paste),
@@ -2109,6 +2130,39 @@ mod tests {
         running_only.retain(|job| !job.terminal());
         let harness = screen_harness(state_with(running_only, Vec::new()));
         assert!(harness.query_by_label("Clear finished").is_none());
+    }
+
+    #[test]
+    fn clear_failed_sits_next_to_clear_finished_and_only_while_something_failed() {
+        // `three_jobs()` holds one failed download, so both buttons are there.
+        let harness = screen_harness(state_with(three_jobs(), Vec::new()));
+        harness.get_by_label("Clear failed");
+        harness.get_by_label("Clear finished");
+
+        // Nothing failed: only "Clear finished".
+        let mut nothing_failed = three_jobs();
+        for job in nothing_failed.iter_mut() {
+            if job.failed() {
+                job.status = Status::Canceled;
+            }
+        }
+        let harness = screen_harness(state_with(nothing_failed, Vec::new()));
+        assert!(harness.query_by_label("Clear failed").is_none());
+        harness.get_by_label("Clear finished");
+
+        // Nothing finished at all: neither button.
+        let running_only: Vec<JobView> = three_jobs().into_iter().filter(|job| !job.terminal()).collect();
+        let harness = screen_harness(state_with(running_only, Vec::new()));
+        assert!(harness.query_by_label("Clear failed").is_none());
+        assert!(harness.query_by_label("Clear finished").is_none());
+    }
+
+    #[test]
+    fn clear_failed_asks_the_app_to_clear_the_failed_transfers() {
+        let mut harness = screen_harness(state_with(three_jobs(), Vec::new()));
+        harness.get_by_label("Clear failed").click_accesskit();
+        harness.run();
+        assert_eq!(harness.state().requests, vec![Request::ClearFailed]);
     }
 
     #[test]

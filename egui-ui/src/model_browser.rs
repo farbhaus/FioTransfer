@@ -63,6 +63,12 @@ impl Status {
             Status::Done | Status::Partial | Status::Failed | Status::Canceled | Status::Skipped
         )
     }
+
+    /// The transfer did not deliver everything: it failed, or it finished with
+    /// files missing. `Clear failed` and the menu bar item's red dot go by this.
+    pub fn failed(&self) -> bool {
+        matches!(self, Status::Failed | Status::Partial)
+    }
 }
 
 impl std::fmt::Display for Status {

@@ -16,7 +16,7 @@ FioTransfer is a desktop app that replaces Frame.io's Transfer app. It moves fil
 - **Watches folders:** pair a folder on your Mac with a Frame.io folder, from the app or by right-clicking the folder in Finder. New files upload once they've finished copying, download once they've finished uploading to Frame.io, or both ways with Mirror. Subfolders are kept. A re-rendered file uploads again and either overwrites its earlier copy on Frame.io or keeps both, your choice per folder. Deleting a file on one side never deletes it on the other.
 - **Syncs with Portal:** each Portal upload link ticked "Sync to FioTransfer" gets a project folder: what the client uploads lands in its IN folder, and what you put in OUT goes back. See [docs/PORTAL.md](docs/PORTAL.md).
 - **Logs every transfer:** each one is listed in History, with a log file saved next to the media.
-- **Keeps running in the menu bar:** close the window and transfers carry on. "Download from Link…" in the menu bar menu opens a small window for a link and where to save it, with the copied link already filled in. It can also start at login.
+- **Keeps running in the menu bar:** close the window and transfers carry on, and a transfer that fails puts a red dot on the menu bar icon until it's cleared. "Download from Link…" in the menu bar menu opens a small window for a link and where to save it, with the copied link already filled in. It can also start at login.
 - **Updates itself:** it tells you when a new version is out and installs it with one click.
 - **Works from the command line:** the `fio` tool does downloads and uploads from scripts.
 
