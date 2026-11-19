@@ -68,8 +68,8 @@ pub fn tray_init() {}
 /// state and the update item (an empty `update` shows "Check for Updates…"
 /// instead).
 ///
-/// `failed` is how many transfers failed and are waiting to be cleared: while it
-/// is not zero the icon carries a red dot (see `mac/tray_darwin.m`).
+/// `failed` is how many failed transfers in the queue nobody has ignored: while
+/// it is not zero the icon carries a red dot (see `mac/tray_darwin.m`).
 #[cfg(target_os = "macos")]
 pub fn tray_set(status: &str, title: &str, login: bool, update: &str, failed: usize) {
     let (cs, ct, cu): (CString, CString, CString) = (cstr(status), cstr(title), cstr(update));

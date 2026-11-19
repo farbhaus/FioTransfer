@@ -16,6 +16,7 @@ pub mod uploadstate;
 pub mod watch;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -61,8 +62,8 @@ impl Status {
     }
 
     /// The transfer did not deliver everything: it failed, or it finished with
-    /// files missing. `Clear failed` and the menu bar item's red dot go by this,
-    /// and it is what the row offers Retry for.
+    /// files missing. `Clear failed` takes these, and the menu bar item's red
+    /// dot counts the ones nobody has ignored.
     pub fn failed(&self) -> bool {
         matches!(self, Status::Failed | Status::Partial)
     }
@@ -237,6 +238,14 @@ impl File {
     pub fn view_url(&self) -> String {
         self.view_url.lock().unwrap().clone()
     }
+
+    /// Which file this is across a watch folder's batches, for a job of `kind`:
+    /// the asset for a download, the path under the watched folder for an
+    /// upload — the keys the watcher counts its retries under.
+    pub fn watch_key(&self, kind: &str) -> String {
+        let id = if self.asset_id.is_empty() { &self.rel_path } else { &self.asset_id };
+        format!("{kind}:{id}")
+    }
 }
 
 // ---------- Job ----------
@@ -262,8 +271,13 @@ pub struct Job {
     pub share_link: Mutex<String>,
     pub link_from_file: AtomicBool,
     pub user_canceled: AtomicBool,
-    /// The user ignored this transfer's failure (see `JobView::ignored`).
+    /// The user ignored this transfer's failure (`IgnoreFailed`, see
+    /// [`Job::ignore`]): it stays in the queue but stops asking for attention.
     pub ignored: AtomicBool,
+    /// For a failed watch-folder batch: the files it did not deliver, keyed by
+    /// [`File::watch_key`]. A later batch of the same watch takes out each file
+    /// it tries again, and once none is left this batch leaves the queue.
+    pub owed: Mutex<Option<HashSet<String>>>,
     pub verify_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 
     pub watch_id: Mutex<String>,
@@ -414,6 +428,26 @@ impl Job {
         self.state.lock().unwrap().status
     }
 
+    /// Failed, and nobody has ignored it: what the menu bar item's red dot
+    /// counts. (A retried failure is not here to count: Retry takes it out of
+    /// the queue.)
+    pub fn unresolved(&self) -> bool {
+        self.status().failed() && !self.ignored.load(Ordering::Relaxed)
+    }
+
+    /// Marks this transfer's failure as seen. Only a failed transfer can be
+    /// ignored, and only once. Returns whether it changed anything, and tells
+    /// the UI when it did.
+    pub fn ignore(&self) -> bool {
+        if !self.status().failed() || self.ignored.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        if let Some(m) = self.mgr() {
+            m.touch();
+        }
+        true
+    }
+
     pub fn phase(&self) -> String {
         self.state.lock().unwrap().phase.clone()
     }
@@ -503,8 +537,8 @@ pub struct JobView {
     pub link: String,
     /// A watch-folder batch.
     pub watch: bool,
-    /// The user has seen this failure and said so (`Ignore`): the transfer keeps
-    /// its failed status, but it stops asking for attention.
+    /// The user has seen this failure and said so (`IgnoreFailed`): the
+    /// transfer keeps its failed status, but it stops asking for attention.
     pub ignored: bool,
 }
 
@@ -543,9 +577,8 @@ impl JobView {
         self.status.failed()
     }
 
-    /// Failed, and nobody has said they know yet. This is what the menu bar
-    /// item's red dot and the menu's "N failed" count go by: ignoring a transfer
-    /// is how the user resolves it without retrying.
+    /// Failed, and nobody has ignored it: what the menu bar item's red dot and
+    /// the menu's "N failed" count.
     pub fn unresolved(&self) -> bool {
         self.failed() && !self.ignored
     }

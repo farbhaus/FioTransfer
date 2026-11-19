@@ -88,7 +88,10 @@ pub const GRID_GAP: f32 = space::XXL;
 const COL_SIZE: f32 = 124.0;
 const COL_SPEED: f32 = 80.0;
 const COL_STATUS: f32 = 120.0;
-const COL_ACTIONS: f32 = 120.0;
+/// Five icon buttons and their gaps. The stylesheet's `.actions` was 120 px, four
+/// buttons; a failed folder upload offers five (files, Retry, Ignore, copy and
+/// open the link), and the fifth would otherwise be dropped off the end.
+const COL_ACTIONS: f32 = 5.0 * size::ICON_BTN + 4.0 * space::XXS;
 /// `.progress` keeps a workable track: the CSS floor is `minmax(80px, 1fr)`.
 const PROGRESS_MIN: f32 = 80.0;
 /// The media queries fire on the viewport (1099 / 999); the list lives inside the
@@ -246,13 +249,19 @@ pub fn file_count(job: &JobView) -> String {
     }
 }
 
+/// The word a resolved failure's pill reads instead of its status, or `None`
+/// while the row still asks for attention (or did not fail).
+fn resolved_word(job: &JobView) -> Option<&'static str> {
+    (job.failed() && job.ignored).then_some("Ignored")
+}
+
 /// The status pill's text, exactly as `updateJob()` builds it.
 ///
-/// A failure the user has ignored reads "Ignored": it is still a failed
-/// transfer, but it is one nobody has to do anything about any more.
+/// An ignored failure reads "Ignored": it is still a failed transfer, but
+/// nobody has to do anything about it any more.
 pub fn status_text(job: &JobView) -> String {
-    if job.ignored && job.failed() {
-        return "Ignored".to_string();
+    if let Some(word) = resolved_word(job) {
+        return word.to_string();
     }
     let terminal = job.terminal();
     let preparing = matches!(job.status, Status::Resolving | Status::Queued);
@@ -426,6 +435,10 @@ pub fn actions_for(job: &JobView) -> Actions {
     let terminal = job.terminal();
     Actions {
         cancel: !terminal,
+        // A finished row can go on its own, in the slot Cancel had, except a
+        // failure nothing has been done about: that one is answered with Retry
+        // or Ignore (or Clear failed), not swept away row by row.
+        remove: terminal && !job.unresolved(),
         retry: terminal && job.status != Status::Done,
         ignore: job.unresolved(),
         copy_link: !job.link.is_empty(),
@@ -438,8 +451,10 @@ pub fn actions_for(job: &JobView) -> Actions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Actions {
     pub cancel: bool,
+    /// The x on a finished row: it leaves the queue, History keeps it.
+    pub remove: bool,
     pub retry: bool,
-    /// `Ignore`: a failed transfer nobody has acknowledged yet.
+    /// `Ignore`: a failed transfer nothing has been done about yet.
     pub ignore: bool,
     pub copy_link: bool,
     /// `.a-open`, "Open in Frame.io": a finished transfer has a share page.
@@ -456,6 +471,8 @@ pub enum Action {
     Toggle(String),
     /// `Cancel` on the row (`call('Cancel', id)`).
     Cancel(String),
+    /// A finished row's x: it leaves the queue (`call('Remove', id)`).
+    Remove(String),
     /// `Retry` on the row.
     Retry(String),
     /// `Copy share link`: the app fetches the job's public link, copies it and
@@ -1313,7 +1330,7 @@ fn row(ui: &mut Ui, job: &JobView, is_open: bool, files: &[FileView]) -> Option<
             &painter,
             &job.error,
             12.0,
-            if job.ignored { theme::TEXT_3 } else { theme::ERROR_TEXT },
+            if resolved_word(job).is_some() { theme::TEXT_3 } else { theme::ERROR_TEXT },
             inner.left() + ROW_INDENT,
             below + h / 2.0,
             (inner.width() - ROW_INDENT).max(0.0),
@@ -1384,7 +1401,10 @@ fn progress_cell(ui: &mut Ui, painter: &Painter, rect: Rect, job: &JobView) {
         pos2(rect.left() + track_w / 2.0, rect.center().y),
         vec2(track_w, size::TRACK_H),
     );
-    track_bar(painter, track, track_fill_fraction(job), track_fill(job.status.as_str()));
+    // A resolved failure's bar goes quiet with its pill, the colour a canceled
+    // row's bar already has.
+    let fill = if resolved_word(job).is_some() { theme::TEXT_4 } else { track_fill(job.status.as_str()) };
+    track_bar(painter, track, track_fill_fraction(job), fill);
     let pct = percent_text(job);
     if !pct.is_empty() {
         line_right(ui, painter, &pct, T_DETAIL, theme::TEXT_2, rect.right(), rect.center().y, pct_w);
@@ -1409,18 +1429,18 @@ fn track_bar(painter: &Painter, rect: Rect, fraction: Option<f32>, fill: Color32
 /// `.status`: a dot and its word, coloured by state.
 fn pill(ui: &mut Ui, painter: &Painter, rect: Rect, job: &JobView) {
     let text = status_text(job);
-    // An ignored failure keeps its place in the list but loses the red: the dot
+    // A resolved failure keeps its place in the list but loses the red: the dot
     // and the word go the way of a muted row.
-    let ignored = job.ignored && job.failed();
+    let resolved = resolved_word(job).is_some();
     let dot = pos2(rect.left() + 3.5, rect.center().y);
     if let Some(halo) = status_halo(job.status.as_str()) {
-        if !ignored {
+        if !resolved {
             painter.circle_stroke(dot, 5.0, Stroke::new(3.0_f32, halo));
         }
     }
-    let dot_color = if ignored { theme::TEXT_3 } else { status_dot_color(job.status.as_str()) };
+    let dot_color = if resolved { theme::TEXT_3 } else { status_dot_color(job.status.as_str()) };
     painter.circle_filled(dot, 3.5, dot_color);
-    let text_color = if ignored { theme::TEXT_3 } else { status_text_color(job.status.as_str()) };
+    let text_color = if resolved { theme::TEXT_3 } else { status_text_color(job.status.as_str()) };
     line_left(
         ui,
         painter,
@@ -1446,7 +1466,8 @@ fn pill(ui: &mut Ui, painter: &Painter, rect: Rect, job: &JobView) {
 fn actions_cell(ui: &mut Ui, rect: Rect, job: &JobView, is_open: bool) -> Option<Action> {
     let shown = actions_for(job);
     // Drawn from the right edge inwards, so this order is the DOM's `.actions`
-    // order read backwards: files, cancel, retry, reveal, copy, open.
+    // order read backwards: files, cancel (or remove), retry, ignore, reveal,
+    // copy, open.
     let mut icons: Vec<(Glyph, &str, Action)> = Vec::new();
     if shown.files {
         let label = if is_open { "Hide files" } else { "Show files" };
@@ -1454,6 +1475,10 @@ fn actions_cell(ui: &mut Ui, rect: Rect, job: &JobView, is_open: bool) -> Option
     }
     if shown.cancel {
         icons.push((Glyph::Cancel, "Cancel", Action::Cancel(job.id.clone())));
+    }
+    if shown.remove {
+        // The same x as Cancel, in the same place: the row goes away.
+        icons.push((Glyph::Cancel, "Remove", Action::Remove(job.id.clone())));
     }
     if shown.retry {
         icons.push((Glyph::Retry, "Retry", Action::Retry(job.id.clone())));
@@ -1597,9 +1622,15 @@ fn files_box(
                 );
                 return;
             }
+            // The box is sized to its rows; the scroll area must not grow past
+            // it, and egui's default 64 px floor would draw a one-file list
+            // over the next row.
+            let list_h = (box_h - FILES_BORDER).max(0.0);
             ScrollArea::vertical()
                 .id_salt("transfers-files")
                 .auto_shrink([false, false])
+                .min_scrolled_height(list_h)
+                .max_height(list_h)
                 .show(ui, |ui| {
                     for (index, file) in ordered.iter().take(shown).enumerate() {
                         file_row(ui, file, &job.kind, index + 1 == shown);
@@ -1677,6 +1708,7 @@ fn report(state: &mut UiState, action: Action) {
 
         // Everything else is one thing the app does (`fiotransfer_core::App`).
         Action::Cancel(id) => state.ask(Request::Cancel(id)),
+        Action::Remove(id) => state.ask(Request::Remove(id)),
         Action::Retry(id) => state.ask(Request::Retry(id)),
         Action::Share(id) => state.ask(Request::ShareLink(id)),
         Action::Reveal(id) => {
@@ -2215,6 +2247,106 @@ mod tests {
         // Clear failed is still there: an ignored transfer is still clearable.
         harness.get_by_label("Clear failed");
         assert_eq!(status_text(&ignored[1]), "Ignored");
+    }
+
+    #[test]
+    fn an_ignored_row_can_be_removed_on_its_own() {
+        // Answered, so not a dead end: its x takes it out of the queue.
+        let mut jobs = three_jobs();
+        jobs[1].ignored = true;
+        // The running upload and the ignored row only: the done one has an x too.
+        jobs.truncate(2);
+        let mut harness = screen_harness(state_with(jobs, Vec::new()));
+        harness.get_by_label("Ignored");
+        harness.get_by_label("Remove").click_accesskit();
+        harness.run();
+        assert_eq!(harness.state().requests, vec![Request::Remove("b".to_string())]);
+    }
+
+    #[test]
+    fn a_finished_row_has_an_x_and_an_unanswered_failure_does_not() {
+        let mut jobs = three_jobs();
+        // Running: Cancel, not Remove.
+        let running = actions_for(&jobs[0]);
+        assert!(running.cancel && !running.remove, "{running:?}");
+        // Failed and unanswered: Retry and Ignore, no x.
+        let failed = actions_for(&jobs[1]);
+        assert!(!failed.remove && failed.retry && failed.ignore, "{failed:?}");
+        // Done: the x, where Cancel was.
+        let done = actions_for(&jobs[2]);
+        assert!(done.remove && !done.cancel, "{done:?}");
+        // Ignored: answered, so it can go too, and Retry stays.
+        jobs[1].ignored = true;
+        let ignored = actions_for(&jobs[1]);
+        assert!(ignored.remove && ignored.retry, "{ignored:?}");
+        jobs[1].ignored = false;
+        jobs[1].status = Status::Canceled;
+        assert!(actions_for(&jobs[1]).remove, "a canceled row can go");
+    }
+
+    #[test]
+    fn an_open_one_file_list_stays_out_of_the_next_row() {
+        // egui's scroll area has a 64 px floor; a one-file box is 32 px, and the
+        // list used to paint over the row below it.
+        let mut a = stamp_job("a", "upload", "first.mov", Status::Failed, 300);
+        a.error = "local file missing".to_string();
+        a.files_total = 1;
+        let mut b = stamp_job("b", "upload", "second.mov", Status::Failed, 200);
+        b.files_total = 1;
+        let files = vec![FileView {
+            name: "first.mov".to_string(),
+            rel_path: "first.mov".to_string(),
+            status: Status::Failed,
+            error: "local file missing".to_string(),
+            ..FileView::default()
+        }];
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(956.0, 500.0))
+            .wgpu()
+            .build_ui_state(|ui, state: &mut UiState| show(ui, state), state_with(vec![a, b], files));
+        harness.run();
+        harness.get_by_label("first.mov").click_accesskit();
+        harness.run();
+        harness.run();
+        let next = harness.get_by_label("second.mov").rect();
+        let image = harness.render().expect("render");
+        let ppp = image.width() as f32 / 956.0;
+        // A point in the next row's top edge, under where the file box would
+        // be (it is indented to the title), must not be the box's fill.
+        let (x, y) = ((next.left() + ROW_PAD_X + ROW_INDENT + 20.0) * ppp, (next.top() + 4.0) * ppp);
+        let px = image.get_pixel(x as u32, y as u32);
+        let panel = theme::PANEL;
+        assert_ne!(
+            [px[0], px[1], px[2]],
+            [panel.r(), panel.g(), panel.b()],
+            "the file box is drawn over the next row"
+        );
+    }
+
+    #[test]
+    fn ignoring_means_nothing_on_a_transfer_that_did_not_fail() {
+        // Defensive: the engine only ignores failed transfers, but a done row
+        // carrying the flag must still read and act as done.
+        let mut jobs = three_jobs();
+        jobs[2].ignored = true;
+        assert_ne!(status_text(&jobs[2]), "Ignored");
+        assert!(!jobs[2].unresolved());
+    }
+
+    #[test]
+    fn a_failed_folder_upload_keeps_all_five_actions() {
+        // Files, Retry, Ignore, Copy share link and Open in Frame.io: the
+        // actions column is wide enough that none falls off the end.
+        let mut upload = stamp_job("f", "upload", "Reel 2", Status::Partial, 50);
+        upload.link = "https://acme.frame.io/project/reel-2".to_string();
+        upload.files_total = 4;
+        upload.files_done = 3;
+        upload.files_failed = 1;
+        upload.error = "1 of 4 files failed".to_string();
+        let harness = screen_harness(state_with(vec![upload], Vec::new()));
+        for label in ["Show files", "Retry", "Ignore", "Copy share link", "Open in Frame.io"] {
+            harness.get_by_label(label);
+        }
     }
 
     #[test]

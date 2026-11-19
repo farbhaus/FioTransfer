@@ -1,7 +1,7 @@
 
 //! The transfer manager: the job list, its lifecycle and the 2 Hz snapshot loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -172,6 +172,7 @@ impl Manager {
             link_from_file: AtomicBool::new(false),
             user_canceled: AtomicBool::new(false),
             ignored: AtomicBool::new(false),
+            owed: Mutex::new(None),
             verify_tasks: Mutex::new(Vec::new()),
             watch_id: Mutex::new(String::new()),
             watch_log: AtomicBool::new(false),
@@ -235,24 +236,92 @@ impl Manager {
         }
     }
 
-    /// Marks one failed transfer as seen, so it stops asking for attention: the
-    /// row keeps its failed status (and history keeps the failure), but the menu
-    /// bar item's dot and its count stop including it. Anything that is not
-    /// failed is left alone. Retrying it is the other way to resolve it.
-    /// Returns whether this changed anything.
-    pub fn ignore(&self, id: &str) -> bool {
-        let Some(j) = self.job(id) else { return false };
-        if !j.status().failed() || j.ignored.swap(true, Ordering::Relaxed) {
-            return false;
+    /// Takes one finished transfer out of the queue (`Remove`), as Clear
+    /// finished does for all of them; History keeps it. A transfer still running
+    /// or queued is left alone — that is what Cancel is for. Returns whether it
+    /// removed anything.
+    pub fn remove(&self, id: &str) -> bool {
+        let removed = {
+            let mut jobs = self.jobs.lock().unwrap();
+            let before = jobs.len();
+            jobs.retain(|j| j.id != id || !j.status().terminal());
+            before != jobs.len()
+        };
+        if removed {
+            self.touch();
         }
-        self.touch();
-        true
+        removed
     }
 
-    /// How many transfers failed and nobody has ignored, which is what the menu
-    /// bar item's red dot shows.
-    pub fn failed(&self) -> usize {
-        self.jobs.lock().unwrap().iter().filter(|j| j.status().failed() && !j.ignored.load(Ordering::Relaxed)).count()
+    /// Marks one failed transfer as seen (`IgnoreFailed`), so it stops asking
+    /// for attention: the row keeps its failed status (and History keeps the
+    /// failure), but the menu bar item's dot and its count stop including it.
+    /// A transfer that did not fail, or was already ignored, is left alone.
+    /// Returns whether this changed anything.
+    pub fn ignore(&self, id: &str) -> bool {
+        self.job(id).is_some_and(|j| j.ignore())
+    }
+
+    /// How many failed transfers in the queue nobody has ignored (a retried one
+    /// has left the queue). The menu bar item's red dot shows while this is not
+    /// zero.
+    pub fn unresolved(&self) -> usize {
+        self.jobs.lock().unwrap().iter().filter(|j| j.unresolved()).count()
+    }
+
+    /// A watch-folder batch has finished: every earlier failed batch of the same
+    /// watch (ignored or not) crosses off the files this one tried again,
+    /// whatever became of them — if this batch failed them too, it is the one
+    /// asking now. A batch with nothing left to cross off leaves the queue, as a
+    /// retried transfer does (History keeps it), so a watch that heals itself
+    /// on its next pass leaves no red dot behind. A batch that failed before it
+    /// listed any file is answered by the next batch of its watch.
+    ///
+    /// A failed `finished` batch first writes down what it owes. The files are
+    /// keyed by [`File::watch_key`], so an upload and a download of a mirrored
+    /// watch never answer for each other.
+    pub fn settle_watch_failures(&self, finished: &Job) {
+        let watch = finished.watch_id.lock().unwrap().clone();
+        if watch.is_empty() {
+            return;
+        }
+        let files = finished.files();
+        if finished.status().failed() {
+            // Written once: finishing twice must not hand back what a later
+            // batch has already crossed off.
+            finished.owed.lock().unwrap().get_or_insert_with(|| {
+                files
+                    .iter()
+                    .filter(|f| !matches!(f.status(), Status::Done | Status::Skipped))
+                    .map(|f| f.watch_key(&finished.kind))
+                    .collect()
+            });
+        }
+        let tried: HashSet<String> =
+            files.iter().filter(|f| f.status().terminal()).map(|f| f.watch_key(&finished.kind)).collect();
+        let earlier: Vec<Arc<Job>> = self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|j| j.id != finished.id && j.status().failed() && *j.watch_id.lock().unwrap() == watch)
+            .cloned()
+            .collect();
+        let mut settled: HashSet<String> = HashSet::new();
+        for j in earlier {
+            let mut owed = j.owed.lock().unwrap();
+            // A batch that has not written down what it owes has not finished
+            // yet: it is not this one's to answer.
+            let Some(owed) = owed.as_mut() else { continue };
+            owed.retain(|k| !tried.contains(k));
+            if owed.is_empty() {
+                settled.insert(j.id.clone());
+            }
+        }
+        if !settled.is_empty() {
+            self.jobs.lock().unwrap().retain(|j| !settled.contains(&j.id));
+            self.touch();
+        }
     }
 
     /// Drops all but the newest finished watch-folder batches, so a
@@ -441,8 +510,19 @@ impl Manager {
 
     // ---------- Retry ----------
 
-    /// Re-runs a transfer from history.
+    /// Re-runs a transfer from history (from its row, or from History). Once the
+    /// new attempt is under way, the row it came from leaves the queue if it is
+    /// still there: the new row takes its place, and History keeps both. A retry
+    /// that could not start leaves the row as it was.
     pub async fn retry(self: &Arc<Self>, id: &str, passphrase: &str) -> Result<Option<Arc<Job>>, String> {
+        let started = self.start_retry(id, passphrase).await;
+        if started.is_ok() {
+            self.remove(id);
+        }
+        started
+    }
+
+    async fn start_retry(self: &Arc<Self>, id: &str, passphrase: &str) -> Result<Option<Arc<Job>>, String> {
         let t = self.hist.get(id)?.ok_or_else(|| "no such transfer".to_string())?;
         let opts: JobOptions = serde_json::from_str(&t.options).unwrap_or_default();
         if t.kind == "download" && opts.watch.is_empty() {
@@ -485,7 +565,9 @@ impl Manager {
         *j.folder_id.lock().unwrap() = t.folder_id.clone();
         *j.dest.lock().unwrap() = t.dest.clone();
         *j.source.lock().unwrap() = t.source.clone();
-        *j.title.lock().unwrap() = format!("Retry: {}", t.title);
+        // A retry of a retry is still one "Retry:", not one per attempt.
+        *j.title.lock().unwrap() =
+            if t.title.starts_with("Retry: ") { t.title.clone() } else { format!("Retry: {}", t.title) };
         *j.paths.lock().unwrap() = opts.paths.clone();
         self.add(&j);
         let _ = self.hist.start(&j.record(), &[]);
@@ -878,6 +960,7 @@ impl Job {
         }
         if !self.watch_id.lock().unwrap().is_empty() {
             if let Some(m) = self.mgr() {
+                m.settle_watch_failures(self);
                 m.prune_watch_jobs();
             }
         }

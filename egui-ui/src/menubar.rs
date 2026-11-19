@@ -148,10 +148,10 @@ async fn menu_loop(app: Arc<App>) {
         }
         tray::sync_dock();
         let (up, down, active) = app.mgr().map(|m| m.activity()).unwrap_or((0.0, 0.0, 0));
-        // Transfers that failed and are still in the queue: the icon carries a
-        // red dot while this is not zero, and the status line says how many.
-        // Failed transfers nobody has ignored: the icon's red dot and the count.
-        let failed = app.mgr().map(|m| m.failed()).unwrap_or(0);
+        // Failed transfers nobody has ignored (a retried one has left the
+        // queue): the icon carries a red dot while this is not zero, and the
+        // status line says how many.
+        let failed = app.mgr().map(|m| m.unresolved()).unwrap_or(0);
         let (status, title) = status_line(up, down, active, failed);
         tray::tray_set(&status, &title, login, &update_title(&app.update_status()), failed);
         let jobs = if active > 0 { menu_jobs(&app.snapshot()) } else { r#"{"jobs":[],"more":0}"#.to_string() };
@@ -165,9 +165,9 @@ async fn menu_loop(app: Arc<App>) {
 
 /// The menu's status line and the text next to the icon.
 ///
-/// "Idle", or "2 active", then how many transfers failed and are waiting to be
-/// cleared — the icon's red dot in words — then the speeds, which are also the
-/// text next to the icon.
+/// "Idle", or "2 active", then how many failed transfers are unresolved — the
+/// icon's red dot in words — then the speeds, which are also the text next to
+/// the icon.
 fn status_line(up: f64, down: f64, active: usize, failed: usize) -> (String, String) {
     let mut parts = vec![if active == 0 { "Idle".to_string() } else { format!("{} active", active) }];
     if failed > 0 {

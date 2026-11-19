@@ -203,13 +203,22 @@ static void fioAppMenuAdd(int tries) {
 }
 
 // fioTrayImage is the menu bar icon: the two arrows, and a red dot in the
-// bottom right corner while a transfer has failed. A template image cannot carry
-// the dot — AppKit tints a template with the menu bar's own ink, and the dot
-// would be tinted with it — so the arrows are tinted here instead (drawn black,
-// then filled with labelColor through the glyph's alpha) and the result is a
-// plain image. The drawing handler runs at every draw, so the ink follows the
-// menu bar's appearance without the icon being rebuilt when it changes.
+// bottom right corner while a failed transfer is unresolved.
+//
+// Without the dot it is the template image the item has always had, so AppKit
+// inks it like every other menu bar extra (and dims it on an inactive display).
+// A template cannot carry the dot — AppKit tints a template with the menu bar's
+// own ink, and the dot would be tinted with it — so with the dot the arrows are
+// tinted here instead (drawn, then filled with labelColor through the glyph's
+// alpha; NSImage renders the handler offscreen, so the fill touches only the
+// icon) and the result is a plain image. The handler runs again when the menu
+// bar's appearance changes, so the ink follows it without a rebuild.
 static NSImage *fioTrayImage(BOOL failed) {
+	if (!failed) {
+		NSImage *img = [NSImage imageWithSystemSymbolName:@"arrow.up.arrow.down" accessibilityDescription:@"FioTransfer"];
+		img.template = YES;
+		return img;
+	}
 	NSImage *symbol = [NSImage imageWithSystemSymbolName:@"arrow.up.arrow.down" accessibilityDescription:nil];
 	symbol = [symbol imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPointSize:13
 	                                                                                           weight:NSFontWeightRegular]];
@@ -220,21 +229,21 @@ static NSImage *fioTrayImage(BOOL failed) {
 		      operation:NSCompositingOperationSourceOver fraction:1];
 		[NSColor.labelColor set];
 		NSRectFillUsingOperation(r, NSCompositingOperationSourceIn);
-		if (failed) {
-			// systemRed in both appearances; drawn after the tint, so it stays red.
-			[[NSColor colorWithSRGBRed:1.0 green:0.231 blue:0.188 alpha:1] set];
-			NSRect dot = NSMakeRect(NSWidth(r) - 7.2, 0.5, 6.7, 6.7);
-			[[NSBezierPath bezierPathWithOvalInRect:dot] fill];
-		}
+		// systemRed in both appearances; drawn after the tint, so it stays red.
+		[[NSColor colorWithSRGBRed:1.0 green:0.231 blue:0.188 alpha:1] set];
+		NSRect dot = NSMakeRect(NSWidth(r) - 7.2, 0.5, 6.7, 6.7);
+		[[NSBezierPath bezierPathWithOvalInRect:dot] fill];
 		return YES;
 	}];
-	img.accessibilityDescription = failed ? @"FioTransfer, transfer failed" : @"FioTransfer";
+	img.accessibilityDescription = @"FioTransfer, transfer failed";
 	return img;
 }
 
-// Whether the icon is drawn with the dot: fioTraySet rebuilds it only when that
-// changes, not on every tick.
+// Whether the icon is drawn with the dot, and the tooltip last set: fioTraySet
+// touches either only when it changes, not on every tick (setting a tooltip
+// takes down one that is showing).
 static BOOL fioTrayFailed;
+static int fioTrayTipCount;
 
 void fioTrayInit(void) {
 	dispatch_async(dispatch_get_main_queue(), ^{
@@ -275,9 +284,9 @@ void fioTrayInit(void) {
 	});
 }
 
-// fioTraySet draws the menu and the icon. `failed` is how many transfers failed
-// and are waiting to be cleared: while it is not zero the icon carries a red dot,
-// and its tooltip says how many.
+// fioTraySet draws the menu and the icon. `failed` is how many failed transfers
+// in the queue nobody has ignored: while it is not zero the icon
+// carries a red dot, and its tooltip says how many.
 void fioTraySet(const char *status, const char *title, int login, const char *update, int failed) {
 	NSString *s = [NSString stringWithUTF8String:status];
 	NSString *t = [NSString stringWithUTF8String:title];
@@ -291,9 +300,12 @@ void fioTraySet(const char *status, const char *title, int login, const char *up
 			fioTrayFailed = dot;
 			fioItem.button.image = fioTrayImage(dot);
 		}
-		fioItem.button.toolTip = dot
-			? [NSString stringWithFormat:@"FioTransfer — %d transfer%s failed", failed, failed == 1 ? "" : "s"]
-			: @"FioTransfer";
+		if (failed != fioTrayTipCount || !fioItem.button.toolTip) {
+			fioTrayTipCount = failed;
+			fioItem.button.toolTip = dot
+				? [NSString stringWithFormat:@"FioTransfer — %d transfer%s failed", failed, failed == 1 ? "" : "s"]
+				: @"FioTransfer";
+		}
 		fioLoginItem.state = login ? NSControlStateValueOn : NSControlStateValueOff;
 		fioUpdateItem.hidden = u.length == 0;
 		fioCheckItem.hidden = u.length > 0; // the update item takes its place

@@ -1033,6 +1033,11 @@ impl App {
         }
     }
 
+    /// `Remove`: one finished transfer leaves the queue (History keeps it).
+    pub fn remove(&self, id: &str) -> bool {
+        self.mgr().map(|m| m.remove(id)).unwrap_or(false)
+    }
+
     /// `IgnoreFailed`: one failed transfer is marked as seen, so it stops being
     /// counted as an error but stays in the list.
     pub fn ignore_failed(&self, id: &str) -> bool {

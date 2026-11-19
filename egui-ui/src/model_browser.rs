@@ -65,15 +65,9 @@ impl Status {
     }
 
     /// The transfer did not deliver everything: it failed, or it finished with
-    /// files missing. `Clear failed` and the menu bar item's red dot go by this.
+    /// files missing. `Clear failed` takes these.
     pub fn failed(&self) -> bool {
         matches!(self, Status::Failed | Status::Partial)
-    }
-}
-
-impl std::fmt::Display for Status {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -122,7 +116,7 @@ pub struct JobView {
     pub link: String,
     /// A watch-folder batch.
     pub watch: bool,
-    /// The user has seen this failure and said so: the transfer keeps its failed
+    /// The user has seen this failure and said so: the job keeps its failed
     /// status but stops asking for attention.
     pub ignored: bool,
 }
@@ -138,8 +132,7 @@ impl JobView {
         self.status.failed()
     }
 
-    /// Failed, and nobody has said they know yet: what the menu bar item's red
-    /// dot and the menu's "N failed" count go by.
+    /// Failed, and nobody has ignored it.
     pub fn unresolved(&self) -> bool {
         self.failed() && !self.ignored
     }
