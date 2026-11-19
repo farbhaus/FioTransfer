@@ -262,6 +262,8 @@ pub struct Job {
     pub share_link: Mutex<String>,
     pub link_from_file: AtomicBool,
     pub user_canceled: AtomicBool,
+    /// The user ignored this transfer's failure (see `JobView::ignored`).
+    pub ignored: AtomicBool,
     pub verify_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 
     pub watch_id: Mutex<String>,
@@ -501,6 +503,9 @@ pub struct JobView {
     pub link: String,
     /// A watch-folder batch.
     pub watch: bool,
+    /// The user has seen this failure and said so (`Ignore`): the transfer keeps
+    /// its failed status, but it stops asking for attention.
+    pub ignored: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -536,6 +541,13 @@ impl JobView {
     /// It did not deliver everything: `status.failed()`.
     pub fn failed(&self) -> bool {
         self.status.failed()
+    }
+
+    /// Failed, and nobody has said they know yet. This is what the menu bar
+    /// item's red dot and the menu's "N failed" count go by: ignoring a transfer
+    /// is how the user resolves it without retrying.
+    pub fn unresolved(&self) -> bool {
+        self.failed() && !self.ignored
     }
 
     /// 0.0–1.0, or `None` while the size isn't known yet.

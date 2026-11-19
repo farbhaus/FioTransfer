@@ -122,12 +122,26 @@ pub struct JobView {
     pub link: String,
     /// A watch-folder batch.
     pub watch: bool,
+    /// The user has seen this failure and said so: the transfer keeps its failed
+    /// status but stops asking for attention.
+    pub ignored: bool,
 }
 
 impl JobView {
     /// Done, one way or another: `status.terminal()`.
     pub fn terminal(&self) -> bool {
         self.status.terminal()
+    }
+
+    /// The transfer did not deliver everything: `status.failed()`.
+    pub fn failed(&self) -> bool {
+        self.status.failed()
+    }
+
+    /// Failed, and nobody has said they know yet: what the menu bar item's red
+    /// dot and the menu's "N failed" count go by.
+    pub fn unresolved(&self) -> bool {
+        self.failed() && !self.ignored
     }
 
     /// 0.0–1.0, or `None` while the size isn't known yet.

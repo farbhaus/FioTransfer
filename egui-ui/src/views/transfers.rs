@@ -247,7 +247,13 @@ pub fn file_count(job: &JobView) -> String {
 }
 
 /// The status pill's text, exactly as `updateJob()` builds it.
+///
+/// A failure the user has ignored reads "Ignored": it is still a failed
+/// transfer, but it is one nobody has to do anything about any more.
 pub fn status_text(job: &JobView) -> String {
+    if job.ignored && job.failed() {
+        return "Ignored".to_string();
+    }
     let terminal = job.terminal();
     let preparing = matches!(job.status, Status::Resolving | Status::Queued);
     let mut text = status_label(job.status.as_str(), &job.kind);
@@ -421,6 +427,7 @@ pub fn actions_for(job: &JobView) -> Actions {
     Actions {
         cancel: !terminal,
         retry: terminal && job.status != Status::Done,
+        ignore: job.unresolved(),
         copy_link: !job.link.is_empty(),
         open: !job.link.is_empty(),
         reveal: job.kind == "download" && !job.dest.is_empty(),
@@ -432,6 +439,8 @@ pub fn actions_for(job: &JobView) -> Actions {
 pub struct Actions {
     pub cancel: bool,
     pub retry: bool,
+    /// `Ignore`: a failed transfer nobody has acknowledged yet.
+    pub ignore: bool,
     pub copy_link: bool,
     /// `.a-open`, "Open in Frame.io": a finished transfer has a share page.
     pub open: bool,
@@ -464,6 +473,10 @@ pub enum Action {
     /// `.head-actions`' "Clear failed": the failed transfers leave the queue, and
     /// the transfers still running, queued or done stay.
     ClearFailed,
+    /// A failed row's "Ignore": the transfer is seen, so it stops asking for
+    /// attention while staying in the queue (`call('IgnoreFailed', id)`). The
+    /// other way to resolve a failure is [`Action::Retry`].
+    Ignore(String),
     /// `.comp-body`'s "Files…" (`PickFiles`): a panel, then the upload starts.
     PickFiles,
     /// `.comp-body`'s "Folder…" (`PickFolder`).
@@ -1300,7 +1313,7 @@ fn row(ui: &mut Ui, job: &JobView, is_open: bool, files: &[FileView]) -> Option<
             &painter,
             &job.error,
             12.0,
-            theme::ERROR_TEXT,
+            if job.ignored { theme::TEXT_3 } else { theme::ERROR_TEXT },
             inner.left() + ROW_INDENT,
             below + h / 2.0,
             (inner.width() - ROW_INDENT).max(0.0),
@@ -1396,17 +1409,24 @@ fn track_bar(painter: &Painter, rect: Rect, fraction: Option<f32>, fill: Color32
 /// `.status`: a dot and its word, coloured by state.
 fn pill(ui: &mut Ui, painter: &Painter, rect: Rect, job: &JobView) {
     let text = status_text(job);
+    // An ignored failure keeps its place in the list but loses the red: the dot
+    // and the word go the way of a muted row.
+    let ignored = job.ignored && job.failed();
     let dot = pos2(rect.left() + 3.5, rect.center().y);
     if let Some(halo) = status_halo(job.status.as_str()) {
-        painter.circle_stroke(dot, 5.0, Stroke::new(3.0_f32, halo));
+        if !ignored {
+            painter.circle_stroke(dot, 5.0, Stroke::new(3.0_f32, halo));
+        }
     }
-    painter.circle_filled(dot, 3.5, status_dot_color(job.status.as_str()));
+    let dot_color = if ignored { theme::TEXT_3 } else { status_dot_color(job.status.as_str()) };
+    painter.circle_filled(dot, 3.5, dot_color);
+    let text_color = if ignored { theme::TEXT_3 } else { status_text_color(job.status.as_str()) };
     line_left(
         ui,
         painter,
         &text,
         T_NOTE,
-        status_text_color(job.status.as_str()),
+        text_color,
         rect.left() + 14.0,
         rect.center().y,
         (rect.width() - 14.0).max(0.0),
@@ -1437,6 +1457,10 @@ fn actions_cell(ui: &mut Ui, rect: Rect, job: &JobView, is_open: bool) -> Option
     }
     if shown.retry {
         icons.push((Glyph::Retry, "Retry", Action::Retry(job.id.clone())));
+    }
+    if shown.ignore {
+        // The other resolution: say "I know" and let the red dot go out.
+        icons.push((Glyph::Ignore, "Ignore", Action::Ignore(job.id.clone())));
     }
     if shown.reveal {
         icons.push((Glyph::Reveal, "Show in Finder", Action::Reveal(job.id.clone())));
@@ -1472,6 +1496,8 @@ pub enum Glyph {
     Copy,
     Reveal,
     Retry,
+    /// `.a-ignore`: the eye, struck through.
+    Ignore,
     Cancel,
     /// The `.a-files` chevron: `true` when it points down (closed).
     ChevronUp(bool),
@@ -1491,6 +1517,7 @@ fn icon_button(ui: &mut Ui, id: Id, rect: Rect, glyph: Glyph, title: &str) -> eg
         Glyph::Copy => Icon::Copy,
         Glyph::Reveal => Icon::Folder,
         Glyph::Retry => Icon::Retry,
+        Glyph::Ignore => Icon::EyeOff,
         Glyph::Cancel => Icon::Close,
         Glyph::ChevronUp(true) => Icon::ChevronDown,
         Glyph::ChevronUp(false) => Icon::ChevronUp,
@@ -1674,6 +1701,7 @@ fn report(state: &mut UiState, action: Action) {
         }
         Action::ClearFinished => state.ask(Request::ClearFinished),
         Action::ClearFailed => state.ask(Request::ClearFailed),
+        Action::Ignore(id) => state.ask(Request::IgnoreFailed(id)),
         Action::PickFiles => state.ask(Request::PickFiles),
         Action::PickFolder => state.ask(Request::PickFolder),
         Action::Paste => state.ask(Request::Paste),
@@ -2155,6 +2183,38 @@ mod tests {
         let harness = screen_harness(state_with(running_only, Vec::new()));
         assert!(harness.query_by_label("Clear failed").is_none());
         assert!(harness.query_by_label("Clear finished").is_none());
+    }
+
+    #[test]
+    fn a_failed_row_offers_ignore_and_the_ignored_one_stops_asking() {
+        // The failed download in `three_jobs()` can be retried or ignored.
+        let mut harness = screen_harness(state_with(three_jobs(), Vec::new()));
+        harness.get_by_label("Retry");
+        harness.get_by_label("Ignore");
+        harness.get_by_label("Ignore").click_accesskit();
+        harness.run();
+        assert_eq!(
+            harness.state().requests,
+            vec![Request::IgnoreFailed("b".to_string())],
+            "the click names the row it was on"
+        );
+
+        // Once it is ignored the button is gone and the pill says so: there is
+        // nothing left to resolve, so the menu bar item's dot goes out.
+        let mut ignored = three_jobs();
+        for job in ignored.iter_mut() {
+            if job.failed() {
+                job.ignored = true;
+            }
+        }
+        assert!(ignored.iter().any(|job| job.failed()), "it is still a failed transfer");
+        assert!(!ignored.iter().any(|job| job.unresolved()), "but nothing is asking");
+        let harness = screen_harness(state_with(ignored.clone(), Vec::new()));
+        assert!(harness.query_by_label("Ignore").is_none());
+        harness.get_by_label("Ignored");
+        // Clear failed is still there: an ignored transfer is still clearable.
+        harness.get_by_label("Clear failed");
+        assert_eq!(status_text(&ignored[1]), "Ignored");
     }
 
     #[test]

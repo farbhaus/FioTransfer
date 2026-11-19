@@ -171,6 +171,7 @@ impl Manager {
             share_link: Mutex::new(String::new()),
             link_from_file: AtomicBool::new(false),
             user_canceled: AtomicBool::new(false),
+            ignored: AtomicBool::new(false),
             verify_tasks: Mutex::new(Vec::new()),
             watch_id: Mutex::new(String::new()),
             watch_log: AtomicBool::new(false),
@@ -234,10 +235,24 @@ impl Manager {
         }
     }
 
-    /// How many transfers in the list failed and are waiting to be cleared, which
-    /// is what the menu bar item's red dot shows.
+    /// Marks one failed transfer as seen, so it stops asking for attention: the
+    /// row keeps its failed status (and history keeps the failure), but the menu
+    /// bar item's dot and its count stop including it. Anything that is not
+    /// failed is left alone. Retrying it is the other way to resolve it.
+    /// Returns whether this changed anything.
+    pub fn ignore(&self, id: &str) -> bool {
+        let Some(j) = self.job(id) else { return false };
+        if !j.status().failed() || j.ignored.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        self.touch();
+        true
+    }
+
+    /// How many transfers failed and nobody has ignored, which is what the menu
+    /// bar item's red dot shows.
     pub fn failed(&self) -> usize {
-        self.jobs.lock().unwrap().iter().filter(|j| j.status().failed()).count()
+        self.jobs.lock().unwrap().iter().filter(|j| j.status().failed() && !j.ignored.load(Ordering::Relaxed)).count()
     }
 
     /// Drops all but the newest finished watch-folder batches, so a
@@ -888,6 +903,7 @@ impl Job {
             files_active: self.n_active.load(Ordering::Relaxed) as i64,
             link: self.link.lock().unwrap().clone(),
             watch: !self.watch_id.lock().unwrap().is_empty(),
+            ignored: self.ignored.load(Ordering::Relaxed),
             ..Default::default()
         };
         if !g.status.terminal() {

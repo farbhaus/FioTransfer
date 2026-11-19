@@ -433,6 +433,10 @@ impl Shell {
                 self.app.clear_failed();
                 self.read_running(ui);
             }
+            Request::IgnoreFailed(id) => {
+                self.app.ignore_failed(&id);
+                self.read_running(ui);
+            }
             Request::Retry(id) => {
                 let (app, tx) = (self.app.clone(), self.tx.clone());
                 self.spawn_task(async move {
