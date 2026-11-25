@@ -502,6 +502,9 @@ pub enum Action {
     Paste,
     /// The download folder button (`PickDownloadDir`).
     PickDownloadDir,
+    /// "Frame.io…" in the Download row: the picker, to download a project or
+    /// folder of the signed-in account.
+    DownloadFromFrameio,
     /// `.dest-pick`: open the destination picker at the level clicked — `-1` the
     /// project glyph (the project list), `0…` a crumb, `None` the rest of it.
     ChooseDestination(Option<i32>),
@@ -981,7 +984,11 @@ fn dest_pick(ui: &mut Ui, rect: Rect, state: &UiState) -> Option<Action> {
     None
 }
 
-/// The Download row's body: the link field with Paste, the folder button, Download.
+/// "Frame.io…": downloads from the signed-in account, picked in the picker.
+pub const FROM_FRAMEIO: &str = "Frame.io…";
+
+/// The Download row's body: the link field with Paste, "Frame.io…" (signed
+/// in), the folder button, Download.
 fn download_body(ui: &mut Ui, state: &UiState, composer: &mut Composer) -> Option<Action> {
     let left = ui.cursor().min;
     let right = left.x + ui.available_width();
@@ -998,6 +1005,11 @@ fn download_body(ui: &mut Ui, state: &UiState, composer: &mut Composer) -> Optio
     let dl_rect = Rect::from_min_size(pos2(x, left.y), vec2(download_w, height));
     x -= space::M + dir_w;
     let dir_rect = Rect::from_min_size(pos2(x, left.y), vec2(dir_w, height));
+    let fio_rect = state.logged_in.then(|| {
+        let w = text_width(ui, FROM_FRAMEIO, T_BODY) + 24.0;
+        x -= space::M + w;
+        Rect::from_min_size(pos2(x, left.y), vec2(w, height))
+    });
     let pass_rect = if composer.needs_passphrase {
         x -= space::M + pass_w.min((x - space::M - left.x - 160.0).max(0.0));
         Some(Rect::from_min_size(pos2(x, left.y), vec2(pass_w, height)))
@@ -1030,6 +1042,13 @@ fn download_body(ui: &mut Ui, state: &UiState, composer: &mut Composer) -> Optio
                     .desired_width(rect.width() - 2.0),
             );
         });
+    }
+
+    if let Some(rect) = fio_rect {
+        let resp = button(ui, rect, FROM_FRAMEIO, false, true).on_hover_text("Download a project or folder");
+        if resp.clicked() {
+            action = Some(Action::DownloadFromFrameio);
+        }
     }
 
     // `.btn` with a folder glyph and the download folder's own name (`#dl-dest`).
@@ -1738,6 +1757,7 @@ fn report(state: &mut UiState, action: Action) {
         Action::PickFolder => state.ask(Request::PickFolder),
         Action::Paste => state.ask(Request::Paste),
         Action::PickDownloadDir => state.ask(Request::PickDownloadDir),
+        Action::DownloadFromFrameio => state.ask(Request::OpenDest { mode: DestMode::Download, at: None }),
         Action::SignIn => state.ask(Request::Login),
         Action::ChooseDestination(at) => {
             state.ask(Request::OpenDest { mode: DestMode::Upload { pending: Vec::new() }, at });
@@ -2529,6 +2549,19 @@ mod tests {
             vec![Request::OpenDest { mode: DestMode::Upload { pending: Vec::new() }, at: None }]
         );
         assert!(harness.state().toasts.is_empty());
+    }
+
+    #[test]
+    fn frameio_opens_the_picker_to_download_and_is_gone_when_signed_out() {
+        let mut harness = screen_harness(state_with(Vec::new(), Vec::new()));
+        harness.get_by_label(FROM_FRAMEIO).click_accesskit();
+        harness.run();
+        assert_eq!(harness.state().requests, vec![Request::OpenDest { mode: DestMode::Download, at: None }]);
+
+        let mut state = state_with(Vec::new(), Vec::new());
+        state.logged_in = false;
+        let harness = screen_harness(state);
+        assert!(harness.query_by_label(FROM_FRAMEIO).is_none(), "nothing to download from without a session");
     }
 
     #[test]

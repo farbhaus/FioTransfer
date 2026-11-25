@@ -969,6 +969,87 @@ pub async fn download_account_file(j: Arc<Job>, f: Arc<File>, acct: &str, seg: i
 
 // ---------- The job ----------
 
+/// What a file still uploading to Frame.io says instead of downloading.
+pub const ERR_STILL_UPLOADING: &str = "still uploading to Frame.io";
+
+/// Downloads a folder of the signed-in account (`start_account_download`):
+/// everything below it, as the watch folders list it (version stacks by their
+/// head version, safe names, duplicate names numbered), each original fetched
+/// with a signed URL the API renews when it expires.
+pub async fn run_account_download(j: Arc<Job>) {
+    run_account_download_inner(j.clone()).await;
+    j.finish().await;
+}
+
+async fn run_account_download_inner(j: Arc<Job>) {
+    j.set_status(Status::Resolving);
+    let Some(m) = j.mgr() else {
+        j.fail("transfer manager stopped");
+        return;
+    };
+    let acct = j.account_id.lock().unwrap().clone();
+    let folder = j.folder_id.lock().unwrap().clone();
+    {
+        let jj = j.clone();
+        let f = folder.clone();
+        tokio::spawn(async move { jj.link_to_folder(&f).await });
+    }
+    j.set_phase("Listing files…");
+    let picked: std::collections::HashSet<String> = j.picked.lock().unwrap().iter().cloned().collect();
+    let only = (!picked.is_empty()).then_some(&picked);
+    let listed = super::watch::list_remote_only(&j.cx, &m.api, &acct, &folder, only).await;
+    let items = match listed {
+        Ok(items) => items,
+        Err(e) => {
+            j.fail(&super::watch::list_error(&e));
+            return;
+        }
+    };
+    if items.is_empty() {
+        j.fail(if picked.is_empty() { "this folder has no files" } else { "nothing picked is on Frame.io anymore" });
+        return;
+    }
+
+    let dest = j.dest.lock().unwrap().clone();
+    let mut root = dest.clone();
+    if j.subfolder.load(Ordering::Relaxed) {
+        let name = share::safe_name(&j.folder_name.lock().unwrap());
+        root = Path::new(&dest).join(&name).to_string_lossy().into_owned();
+    }
+    *j.log_root.lock().unwrap() = root.clone();
+
+    let mut list: Vec<Arc<File>> = Vec::with_capacity(items.len());
+    for (i, it) in items.iter().enumerate() {
+        let rel = it.rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let local = Path::new(&root).join(&rel).to_string_lossy().into_owned();
+        let mut f = File::new(i, base_name(&it.rel), &it.rel, &local, it.size);
+        f.asset_id = it.id.clone();
+        if !it.ready {
+            let mut g = f.inner.lock().unwrap();
+            g.status = Status::Failed;
+            g.err = ERR_STILL_UPLOADING.to_string();
+        }
+        let f = Arc::new(f);
+        f.attach(&j);
+        list.push(f);
+        j.add_total(it.size);
+    }
+    j.set_files(list);
+    j.persist_start();
+
+    let seg = (m.settings)().segment_mb as i64 * (1 << 20);
+    j.set_status(Status::Running);
+    j.set_phase("");
+    let task: FileTask = Arc::new(move |jj: Arc<Job>, ff: Arc<File>| {
+        async move {
+            let acct = jj.account_id.lock().unwrap().clone();
+            download_account_file(jj, ff, &acct, seg).await
+        }
+        .boxed()
+    });
+    j.run_files(task).await;
+}
+
 /// Downloads a share link's files into the job's destination folder.
 pub async fn run_download(j: Arc<Job>) {
     run_download_inner(j.clone()).await;

@@ -384,6 +384,8 @@ pub struct DestNode {
     pub where_: String,
     /// A search hit from anywhere in the account rather than a row of this level.
     pub remote: bool,
+    /// A file's size (the download picker lists files too).
+    pub size: i64,
 }
 
 /// What the picker's Choose does.
@@ -393,6 +395,8 @@ pub enum DestMode {
     Upload { pending: Vec<String> },
     /// Put the folder in the watch editor.
     Watch,
+    /// Download the folder, everything in it, to the download folder.
+    Download,
 }
 
 /// The destination picker (`#dest-modal`): a level at a time from the accounts
@@ -435,6 +439,9 @@ pub struct DestPicker {
     pub qseq: u64,
     /// The search field takes the keyboard when the picker opens.
     pub focus_query: bool,
+    /// Downloading: the ticked rows of the open level, by ID, in the order
+    /// ticked. None ticked downloads the whole open project or folder.
+    pub picked: Vec<String>,
 }
 
 impl DestPicker {
@@ -458,7 +465,24 @@ impl DestPicker {
             seq: 0,
             qseq: 0,
             focus_query: true,
+            picked: Vec::new(),
         }
+    }
+
+    /// Ticks or unticks a row of the open level.
+    pub fn toggle_pick(&mut self, id: &str) {
+        match self.picked.iter().position(|p| p == id) {
+            Some(i) => {
+                self.picked.remove(i);
+            }
+            None => self.picked.push(id.to_string()),
+        }
+    }
+
+    /// The ticked rows, in the order ticked, that are still listed.
+    pub fn picked_nodes(&self) -> Vec<&DestNode> {
+        let items = self.items.as_deref().unwrap_or(&[]);
+        self.picked.iter().filter_map(|id| items.iter().find(|n| &n.id == id)).collect()
     }
 
     pub fn top(&self) -> Option<&DestNode> {

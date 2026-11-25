@@ -38,6 +38,9 @@ pub enum Icon {
     Donut,
     /// A failed transfer the user has seen: `Ignore`.
     EyeOff,
+    /// A file on Frame.io (the download picker's file rows): a sheet with a
+    /// folded corner.
+    File,
 }
 
 /// One `<path>`: its data, `stroke-width`, and whether its caps and joins are
@@ -71,6 +74,10 @@ fn parts(icon: Icon) -> &'static [Part] {
             true,
             true,
         )],
+        Icon::File => icon![
+            part("M6.2 3h5.3L15 6.5v9.3c0 .7-.5 1.2-1.2 1.2H6.2c-.7 0-1.2-.5-1.2-1.2V4.2C5 3.5 5.5 3 6.2 3z", 1.4, false, false),
+            part("M11.5 3v3.5H15", 1.4, false, false),
+        ],
         Icon::Folder => icon![part(
             "M3 6.2c0-.7.5-1.2 1.2-1.2h3.4l1.6 1.7h6.6c.7 0 1.2.5 1.2 1.2v6.9c0 .7-.5 1.2-1.2 1.2H4.2c-.7 0-1.2-.5-1.2-1.2z",
             1.4,
@@ -469,7 +476,7 @@ fn arc(sub: &mut Sub, p0: Pos2, rx: f32, ry: f32, rot_deg: f32, large: bool, swe
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 24] = [
+    const ALL: [Icon; 25] = [
         Icon::Up,
         Icon::Down,
         Icon::Sync,
@@ -494,6 +501,7 @@ mod tests {
         Icon::Sliders,
         Icon::Donut,
         Icon::EyeOff,
+        Icon::File,
     ];
 
     fn close(a: Pos2, b: Pos2) -> bool {

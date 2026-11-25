@@ -26,7 +26,7 @@ use crate::portal;
 use crate::services::ServiceRequest;
 use crate::share;
 use crate::update::{self, Release};
-use crate::xfer::{self, manager as xfer_manager, DownloadOptions, LinkInfo, Snapshot, Status, UploadOptions};
+use crate::xfer::{self, manager as xfer_manager, AccountDownloadOptions, DownloadOptions, LinkInfo, Snapshot, Status, UploadOptions};
 
 mod space_folders;
 pub use space_folders::{
@@ -44,6 +44,13 @@ pub struct Node {
     /// Search results: the folder's project.
     #[serde(rename = "where", default, skip_serializing_if = "String::is_empty")]
     pub where_: String,
+    /// A file's size (`list_items`; a version stack's is its head version's).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub size: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -767,7 +774,7 @@ impl App {
                 name: p.name.clone(),
                 kind: "project".into(),
                 folder_id: p.root_folder_id.clone(),
-                where_: String::new(),
+                ..Default::default()
             })
             .collect();
         self.remember(&out);
@@ -780,14 +787,41 @@ impl App {
         Ok(kids
             .iter()
             .filter(|k| k.type_ == "folder")
-            .map(|k| Node { id: k.id.clone(), name: k.name.clone(), kind: "folder".into(), folder_id: k.id.clone(), where_: String::new() })
+            .map(|k| Node { id: k.id.clone(), name: k.name.clone(), kind: "folder".into(), folder_id: k.id.clone(), ..Default::default() })
             .collect())
+    }
+
+    /// A folder's folders and files, folders first, for picking what to
+    /// download. A version stack is a "file" row under the stack's ID (the
+    /// download takes its head version), sized by its head version when the
+    /// listing names one.
+    pub async fn list_items(&self, acct: &str, folder: &str) -> Result<Vec<Node>, String> {
+        let cx = self.api_cx();
+        let kids = self.api.children(&cx, acct, folder).await.map_err(|e| e.to_string())?;
+        let mut folders: Vec<Node> = Vec::new();
+        let mut files: Vec<Node> = Vec::new();
+        for k in &kids {
+            match k.type_.as_str() {
+                "folder" => folders.push(Node { id: k.id.clone(), name: k.name.clone(), kind: "folder".into(), folder_id: k.id.clone(), ..Default::default() }),
+                "file" | "version_stack" => {
+                    let head = k.head_version.as_deref().filter(|h| k.type_ == "version_stack" && !h.id.is_empty());
+                    let (name, size) = match head {
+                        Some(h) => (h.name.clone(), h.file_size),
+                        None => (k.name.clone(), k.file_size),
+                    };
+                    files.push(Node { id: k.id.clone(), name, kind: "file".into(), size, ..Default::default() });
+                }
+                _ => {}
+            }
+        }
+        folders.extend(files);
+        Ok(folders)
     }
 
     pub async fn create_folder(&self, acct: &str, parent: &str, name: &str) -> Result<Node, String> {
         let cx = self.api_cx();
         let f = self.api.create_folder(&cx, acct, parent, name.trim()).await.map_err(|e| e.to_string())?;
-        Ok(Node { id: f.id.clone(), name: f.name.clone(), kind: "folder".into(), folder_id: f.id, where_: String::new() })
+        Ok(Node { id: f.id.clone(), name: f.name.clone(), kind: "folder".into(), folder_id: f.id, ..Default::default() })
     }
 
     /// The picker path down to a project or folder.
@@ -803,7 +837,7 @@ impl App {
                 }
                 folders.insert(
                     0,
-                    Node { id: f.id.clone(), name: f.name.clone(), kind: "folder".into(), folder_id: f.id.clone(), where_: String::new() },
+                    Node { id: f.id.clone(), name: f.name.clone(), kind: "folder".into(), folder_id: f.id.clone(), ..Default::default() },
                 );
                 let next = f.parent_id.clone();
                 // As in the Go app: a failed step up the chain is an error, not a
@@ -819,7 +853,7 @@ impl App {
         let mut path = vec![
             Node { id: acct.to_string(), name: acct_name, kind: "account".into(), ..Default::default() },
             Node { id: p.workspace_id.clone(), name: ws_name, kind: "workspace".into(), ..Default::default() },
-            Node { id: p.id.clone(), name: p.name.clone(), kind: "project".into(), folder_id: p.root_folder_id.clone(), where_: String::new() },
+            Node { id: p.id.clone(), name: p.name.clone(), kind: "project".into(), folder_id: p.root_folder_id.clone(), ..Default::default() },
         ];
         path.extend(folders);
         Ok(path)
@@ -876,7 +910,7 @@ impl App {
                         name: r.name.clone(),
                         kind: "project".into(),
                         folder_id: r.root_folder_id.clone(),
-                        where_: String::new(),
+                        ..Default::default()
                     });
                     projects.push(String::new());
                 }
@@ -884,7 +918,7 @@ impl App {
                     if r.parent_id.is_empty() {
                         continue;
                     }
-                    out.push(Node { id: r.id.clone(), name: r.name.clone(), kind: "folder".into(), folder_id: r.id.clone(), where_: String::new() });
+                    out.push(Node { id: r.id.clone(), name: r.name.clone(), kind: "folder".into(), folder_id: r.id.clone(), ..Default::default() });
                     projects.push(r.project_id.clone());
                 }
                 _ => {}
@@ -1003,6 +1037,17 @@ impl App {
             o.dest_dir = self.settings().download_dir;
         }
         let j = m.start_download(o)?;
+        Ok(j.id.clone())
+    }
+
+    /// Downloads a folder of the signed-in account (Transfers → Frame.io…).
+    pub fn start_account_download(&self, o: AccountDownloadOptions) -> Result<String, String> {
+        let Some(m) = self.mgr() else { return Err("transfers aren't running".into()) };
+        let mut o = o;
+        if o.dest_dir.is_empty() {
+            o.dest_dir = self.settings().download_dir;
+        }
+        let j = m.start_account_download(o)?;
         Ok(j.id.clone())
     }
 

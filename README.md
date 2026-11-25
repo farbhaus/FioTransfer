@@ -9,6 +9,7 @@ FioTransfer is a desktop app that replaces Frame.io's Transfer app. It moves fil
 ## What it does
 
 - **Downloads from any Frame.io link:** share links, review links and `f.io` short links, from any account, including passphrase-protected ones. Files go to the folder you choose, with their folder structure, and you don't need to sign in.
+- **Downloads from your own Frame.io:** "Frame.io…" next to the download folder lets you browse your account and download a whole project or folder, or just the files and folders you tick, subfolders included.
 - **Downloads from other services too:** Smash, WeTransfer, Dropbox and Google Drive links, and Portal download links. Folders arrive file by file with their structure instead of as one zip, and password-protected Smash, WeTransfer and Portal links work.
 - **Uploads files and folders:** drop anything onto the window, or right-click it in Finder and choose Upload with FioTransfer. Folders are recreated in Frame.io, and one click copies a share link to what you uploaded that anyone can open. A file that's still being written waits until it's finished, and an upload counts as done only once Frame.io confirms it.
 - **Runs at full speed:** each transfer is split across many parallel connections, measured at over 900 Mbit/s.

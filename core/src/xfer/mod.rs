@@ -264,6 +264,10 @@ pub struct Job {
     pub passphrase: Mutex<String>,
     pub subfolder: AtomicBool,
     pub paths: Mutex<Vec<String>>,
+    /// An account download's picked items (`AccountDownloadOptions::items`).
+    pub picked: Mutex<Vec<String>>,
+    /// An account download's local folder name with `subfolder`.
+    pub folder_name: Mutex<String>,
     pub log_root: Mutex<String>,
     pub log_name: Mutex<String>,
 
@@ -627,6 +631,34 @@ impl DownloadOptions {
     pub fn from_value(v: &serde_json::Value) -> DownloadOptions {
         serde_json::from_value(v.clone()).unwrap_or_default()
     }
+}
+
+/// A download of a folder (or a project's root folder) in the signed-in
+/// account, picked in the destination picker.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AccountDownloadOptions {
+    #[serde(default)]
+    pub account_id: String,
+    #[serde(default)]
+    pub folder_id: String,
+    /// The folder's name (a project root's is the project's): the local
+    /// folder's with `subfolder`, and the job's title when `title` is empty.
+    #[serde(default)]
+    pub name: String,
+    /// The job's title, when it isn't the folder's name (a few items picked).
+    #[serde(default)]
+    pub title: String,
+    /// The folder's own children (folders, files, version stacks) to download,
+    /// with everything inside them; empty: the whole folder.
+    #[serde(default)]
+    pub items: Vec<String>,
+    /// Where it is, "Project / Folder": the job's source line.
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub dest_dir: String,
+    #[serde(default)]
+    pub subfolder: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

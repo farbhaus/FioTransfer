@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::sharelink::ShareListing;
 use super::{
-    fmt_bytes, fmt_dur, DownloadOptions, File, FileView, Job, JobState, JobView, LinkInfo, Manager, Scanned,
+    fmt_bytes, fmt_dur, AccountDownloadOptions, DownloadOptions, File, FileView, Job, JobState, JobView, LinkInfo, Manager, Scanned,
     Snapshot, Status, UploadOptions, KEEP_WATCH_JOBS, VERIFY_DELAYS,
 };
 use crate::api::Client;
@@ -165,6 +165,8 @@ impl Manager {
             passphrase: Mutex::new(String::new()),
             subfolder: AtomicBool::new(false),
             paths: Mutex::new(Vec::new()),
+            picked: Mutex::new(Vec::new()),
+            folder_name: Mutex::new(String::new()),
             log_root: Mutex::new(String::new()),
             log_name: Mutex::new(String::new()),
             link: Mutex::new(String::new()),
@@ -389,6 +391,38 @@ impl Manager {
         Ok(j)
     }
 
+    /// Downloads a folder of the signed-in account, everything below it, the
+    /// way a share link's files download (resume, history, Retry).
+    pub fn start_account_download(self: &Arc<Self>, o: AccountDownloadOptions) -> Result<Arc<Job>, String> {
+        if o.account_id.is_empty() || o.folder_id.is_empty() {
+            return Err("choose a Frame.io folder first".to_string());
+        }
+        if !self.api.auth.logged_in() {
+            return Err("sign in to Frame.io first".to_string());
+        }
+        match std::fs::metadata(&o.dest_dir) {
+            Ok(md) if md.is_dir() => {}
+            _ => return Err(format!("destination folder not found: {}", o.dest_dir)),
+        }
+        let name = if o.name.trim().is_empty() { "Frame.io folder".to_string() } else { o.name.trim().to_string() };
+        let title = if o.title.trim().is_empty() { name.clone() } else { o.title.trim().to_string() };
+        let j = self.new_job("download");
+        *j.account_id.lock().unwrap() = o.account_id.clone();
+        *j.folder_id.lock().unwrap() = o.folder_id.clone();
+        *j.source.lock().unwrap() = if o.label.is_empty() { name.clone() } else { o.label.clone() };
+        *j.dest.lock().unwrap() = o.dest_dir.clone();
+        *j.title.lock().unwrap() = title;
+        *j.folder_name.lock().unwrap() = name;
+        *j.picked.lock().unwrap() = o.items.clone();
+        j.subfolder.store(o.subfolder, Ordering::Relaxed);
+        self.add(&j);
+        let _ = self.hist.start(&j.record(), &[]);
+        self.hist.log(&format!("DOWNLOAD queued   [{}] Frame.io {} -> {}", j.id, o.label, o.dest_dir));
+        let jj = j.clone();
+        tokio::spawn(async move { super::download::run_account_download(jj).await });
+        Ok(j)
+    }
+
     /// Resolves a link and lists its files. The result is returned even on
     /// error once the link resolved, so callers can report what it was.
     pub async fn list_share(
@@ -525,6 +559,20 @@ impl Manager {
     async fn start_retry(self: &Arc<Self>, id: &str, passphrase: &str) -> Result<Option<Arc<Job>>, String> {
         let t = self.hist.get(id)?.ok_or_else(|| "no such transfer".to_string())?;
         let opts: JobOptions = serde_json::from_str(&t.options).unwrap_or_default();
+        if is_account_download(&t) {
+            // Listed again: what finished last time is found on disk and skipped.
+            let j = self.start_account_download(AccountDownloadOptions {
+                account_id: t.account_id.clone(),
+                folder_id: t.folder_id.clone(),
+                name: if opts.folder.is_empty() { t.title.clone() } else { opts.folder.clone() },
+                title: t.title.clone(),
+                items: opts.items.clone(),
+                label: t.source.clone(),
+                dest_dir: t.dest.clone(),
+                subfolder: opts.subfolder,
+            })?;
+            return Ok(Some(j));
+        }
         if t.kind == "download" && opts.watch.is_empty() {
             let j = self.start_download(DownloadOptions {
                 link: t.source.clone(),
@@ -661,6 +709,8 @@ impl Job {
             subfolder: self.subfolder.load(Ordering::Relaxed),
             paths: self.paths.lock().unwrap().clone(),
             watch: self.watch_id.lock().unwrap().clone(),
+            items: self.picked.lock().unwrap().clone(),
+            folder: self.folder_name.lock().unwrap().clone(),
         })
         .unwrap_or_default();
         let g = self.state.lock().unwrap();
@@ -1150,6 +1200,19 @@ async fn retry_upload(m: Arc<Manager>, j: Arc<Job>, todo: Vec<history::File>) {
 
 // ---------- Helpers ----------
 
+/// A download from the signed-in account (`start_account_download`): a
+/// download with a Frame.io folder that no watch folder made. Share downloads
+/// have no account; watch batches have their watch, and their local folder in
+/// `paths`.
+pub fn is_account_download(t: &history::Transfer) -> bool {
+    let opts: JobOptions = serde_json::from_str(&t.options).unwrap_or_default();
+    t.kind == "download"
+        && !t.account_id.is_empty()
+        && !t.folder_id.is_empty()
+        && opts.watch.is_empty()
+        && opts.paths.is_empty()
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct JobOptions {
     #[serde(default)]
@@ -1158,6 +1221,12 @@ struct JobOptions {
     paths: Vec<String>,
     #[serde(default)]
     watch: String,
+    /// An account download's picked items; none: the whole folder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    items: Vec<String>,
+    /// An account download's folder name (its local folder with `subfolder`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    folder: String,
 }
 
 pub const INSPECT_TTL: Duration = Duration::from_secs(5 * 60);

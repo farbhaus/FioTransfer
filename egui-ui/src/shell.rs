@@ -43,7 +43,7 @@ use fiotransfer_core::history;
 use fiotransfer_core::host::Host;
 use fiotransfer_core::portal::agent::PortalStatus;
 use fiotransfer_core::share;
-use fiotransfer_core::xfer::{DownloadOptions, LinkInfo};
+use fiotransfer_core::xfer::{AccountDownloadOptions, DownloadOptions, LinkInfo};
 
 use crate::menubar;
 use crate::model::{
@@ -1326,6 +1326,8 @@ impl Shell {
                 .watch_editor
                 .as_ref()
                 .map(|e| (e.account_id.trim().to_string(), e.folder_id.trim().to_string())),
+            // A download starts at the projects: what to fetch has no default.
+            DestMode::Download => None,
         }
         .filter(|(acct, folder)| !acct.is_empty() && !folder.is_empty());
         ui.dest_picker = Some(DestPicker::new(mode));
@@ -1362,7 +1364,10 @@ impl Shell {
         p.seq += 1;
         p.items = None;
         p.error.clear();
+        p.picked.clear();
         let (seq, stack) = (p.seq, p.stack.clone());
+        // A download picks files as well as folders.
+        let files = p.mode == DestMode::Download;
         let (app, tx) = (self.app.clone(), self.tx.clone());
         self.spawn_task(async move {
             let acct = stack.first().map(|n| n.id.clone()).unwrap_or_default();
@@ -1370,6 +1375,7 @@ impl Shell {
                 None => app.list_accounts().await,
                 Some(top) if top.kind == "account" => app.list_workspaces(&top.id).await,
                 Some(top) if top.kind == "workspace" => app.list_projects(&acct, &top.id).await,
+                Some(top) if files => app.list_items(&acct, &top.folder_id).await,
                 Some(top) => app.list_folders(&acct, &top.folder_id).await,
             };
             let _ = tx.send(Update::Done(Done::DestLevel { seq, skip, result: result.map(dest_nodes) }));
@@ -1504,6 +1510,9 @@ impl Shell {
     /// and what was waiting for it uploads.
     fn dest_choose(&mut self, ui: &mut UiState) {
         let Some(p) = ui.dest_picker.as_ref().filter(|p| p.in_folder()) else { return };
+        if p.mode == DestMode::Download {
+            return self.download_chosen(ui);
+        }
         let DestMode::Upload { pending } = &p.mode else { return };
         let (Some(acct), Some(top)) = (p.stack.first(), p.top()) else { return };
         let (acct, folder, label) = (acct.id.clone(), top.folder_id.clone(), p.label());
@@ -1516,6 +1525,37 @@ impl Shell {
                 if !pending.is_empty() {
                     self.start_upload(ui, pending);
                 }
+            }
+            Err(err) => ui.push_toast(err, ToastKind::Err),
+        }
+    }
+
+    /// The picker's Download: the open project or folder, everything in it, to
+    /// the download folder (inside a folder of its name with "New folder").
+    fn download_chosen(&mut self, ui: &mut UiState) {
+        let Some(p) = ui.dest_picker.as_ref().filter(|p| p.in_folder()) else { return };
+        let (Some(acct), Some(top)) = (p.stack.first(), p.top()) else { return };
+        let dest_dir = if ui.download_dir.is_empty() { ui.settings.download_dir.clone() } else { ui.download_dir.clone() };
+        let picked = p.picked_nodes();
+        let title = match picked.as_slice() {
+            [] => String::new(),
+            [one] => one.name.clone(),
+            [first, rest @ ..] => format!("{} + {} more", first.name, rest.len()),
+        };
+        let options = AccountDownloadOptions {
+            account_id: acct.id.clone(),
+            folder_id: top.folder_id.clone(),
+            name: top.name.clone(),
+            title,
+            items: picked.iter().map(|n| n.id.clone()).collect(),
+            label: p.label(),
+            dest_dir,
+            subfolder: ui.new_folder,
+        };
+        match self.app.start_account_download(options) {
+            Ok(_) => {
+                ui.dest_picker = None;
+                self.read_running(ui);
             }
             Err(err) => ui.push_toast(err, ToastKind::Err),
         }
@@ -1720,7 +1760,7 @@ impl Drop for Gate {
 }
 
 fn dest_node(n: Node) -> DestNode {
-    DestNode { id: n.id, name: n.name, kind: n.kind, folder_id: n.folder_id, where_: n.where_, remote: false }
+    DestNode { id: n.id, name: n.name, kind: n.kind, folder_id: n.folder_id, where_: n.where_, remote: false, size: n.size }
 }
 
 fn dest_nodes(nodes: Vec<Node>) -> Vec<DestNode> {

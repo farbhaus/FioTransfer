@@ -1,7 +1,7 @@
 //! The destination picker (`#dest-modal`): Frame.io a level at a time —
 //! accounts, workspaces, projects, folders — with a search over the level and,
 //! from two letters, over the whole account. Uploads choose their folder here,
-//! and so does the watch editor.
+//! the watch editor does, and so does a download from the account.
 //!
 //! The view moves the picker's own state (the path, the query, the keyboard
 //! row) and asks the shell for anything that needs Frame.io
@@ -15,12 +15,14 @@ use egui::{
 };
 
 use crate::icons::{self, Icon};
-use crate::model::{DestMode, DestNode, DestPicker, Request, UiState};
+use crate::model::{fmt_bytes, DestMode, DestNode, DestPicker, Request, UiState};
 use crate::theme;
 
 pub const TITLE_PICK: &str = "Frame.io folder";
 pub const CHOOSE_UPLOAD: &str = "Upload here";
 pub const CHOOSE_PICK: &str = "Choose";
+pub const TITLE_DOWNLOAD: &str = "Download from Frame.io";
+pub const CHOOSE_DOWNLOAD: &str = "Download";
 pub const CANCEL: &str = "Cancel";
 pub const CLOSE: &str = "Close";
 pub const NEW_FOLDER: &str = "New folder";
@@ -40,6 +42,8 @@ const SEARCH_PAUSE: f64 = 0.3;
 /// What the user did this frame.
 enum Do {
     Open(DestNode),
+    /// Downloading: tick or untick a row of the open level.
+    Pick(String),
     Crumb(usize),
     NewFolder,
     Choose,
@@ -105,6 +109,9 @@ pub fn show(ctx: &egui::Context, state: &mut UiState) {
     let Some(act) = act else { return };
     let Some(picker) = state.dest_picker.as_mut() else { return };
     match act {
+        Do::Pick(id) => picker.toggle_pick(&id),
+        // Enter on a file row ticks it: a file doesn't open.
+        Do::Open(node) if node.kind == "file" => picker.toggle_pick(&node.id),
         Do::Open(node) => {
             picker.clear_query();
             picker.focus_query = true;
@@ -137,7 +144,7 @@ pub fn show(ctx: &egui::Context, state: &mut UiState) {
             }
         }
         Do::Choose => match picker.mode {
-            DestMode::Upload { .. } => state.requests.push(Request::DestChoose),
+            DestMode::Upload { .. } | DestMode::Download => state.requests.push(Request::DestChoose),
             DestMode::Watch => {
                 let chosen = picker.stack.first().map(|a| a.id.clone()).zip(picker.top().map(|t| t.folder_id.clone()));
                 let label = picker.label();
@@ -153,11 +160,12 @@ pub fn show(ctx: &egui::Context, state: &mut UiState) {
     }
 }
 
-/// `Upload clip.mov to`, `Upload 3 items to`, `Upload to`, or the watch
-/// editor's `Frame.io folder`.
+/// `Upload clip.mov to`, `Upload 3 items to`, `Upload to`, the watch
+/// editor's `Frame.io folder`, or `Download from Frame.io`.
 pub fn title(picker: &DestPicker) -> String {
     match &picker.mode {
         DestMode::Watch => TITLE_PICK.to_string(),
+        DestMode::Download => TITLE_DOWNLOAD.to_string(),
         DestMode::Upload { pending } => match pending.len() {
             0 => "Upload to".to_string(),
             1 => format!("Upload {} to", base_name(&pending[0])),
@@ -323,14 +331,23 @@ fn list(
                 }
                 let q = picker.query.trim();
                 let mark = !q.is_empty() || picker.kbd;
+                // Downloading from a project or folder: its rows can be ticked.
+                let ticks = picker.mode == DestMode::Download && picker.in_folder();
                 for (i, node) in here.iter().enumerate() {
-                    if row(ui, node, q, mark && picker.sel == i, picker.scroll_sel) {
-                        *act = Some(Do::Open(node.clone()));
+                    let tick = ticks.then(|| picker.picked.contains(&node.id));
+                    match row(ui, node, q, mark && picker.sel == i, picker.scroll_sel, tick) {
+                        Hit::Open => *act = Some(Do::Open(node.clone())),
+                        Hit::Pick => *act = Some(Do::Pick(node.id.clone())),
+                        Hit::None => {}
                     }
                 }
                 let everywhere = q.chars().count() >= 2 && can_search;
                 if q.is_empty() && here.is_empty() {
-                    let empty = if picker.in_folder() { "No folders" } else { "Empty" };
+                    let empty = match (picker.in_folder(), &picker.mode) {
+                        (true, DestMode::Download) => "Empty folder",
+                        (true, _) => "No folders",
+                        _ => "Empty",
+                    };
                     message(ui, Msg::Text(empty, theme::TEXT_3));
                 } else if everywhere && (!picker.hits_error.is_empty() || picker.hits.is_none() || !there.is_empty()) {
                     section(ui, ALL_PROJECTS);
@@ -340,7 +357,7 @@ fn list(
                         note(ui, None);
                     } else {
                         for (k, node) in there.iter().enumerate() {
-                            if row(ui, node, q, mark && picker.sel == here.len() + k, picker.scroll_sel) {
+                            if row(ui, node, q, mark && picker.sel == here.len() + k, picker.scroll_sel, None) == Hit::Open {
                                 *act = Some(Do::Open(node.clone()));
                             }
                         }
@@ -353,16 +370,52 @@ fn list(
     });
 }
 
+/// What a click on a row asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hit {
+    None,
+    Open,
+    Pick,
+}
+
 /// `.dest-item`: the kind's glyph, the name (the search's match in bold), the
 /// hit's project, a chevron; `scroll` brings it into view when selected.
-/// Answers whether it was clicked.
-fn row(ui: &mut Ui, node: &DestNode, query: &str, selected: bool, scroll: bool) -> bool {
+/// Downloading, `tick` is the row's box: ticked or not. A file row is all
+/// box (a click ticks it) and shows its size where a folder has its chevron.
+fn row(ui: &mut Ui, node: &DestNode, query: &str, selected: bool, scroll: bool, tick: Option<bool>) -> Hit {
     let width = ui.available_width();
+    let file = node.kind == "file";
     let (rect, response) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click());
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &node.name));
-    let hovered = response.hovered();
+    match tick {
+        Some(on) if file => response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, &node.name)),
+        _ => response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &node.name)),
+    }
+    let mut hit = if !response.clicked() {
+        Hit::None
+    } else if file {
+        Hit::Pick
+    } else {
+        Hit::Open
+    };
+    // Under the pointer counts its box too, which takes the hover from the row.
+    let hovered = response.hovered() || (tick.is_some() && ui.rect_contains_pointer(rect));
     if selected || hovered {
         ui.painter().rect_filled(rect, theme::R_S, if selected { theme::ACTIVE } else { theme::HOVER });
+    }
+    // A folder's box is its own target: ticking it doesn't open the folder.
+    let mut glyph_x = rect.left() + 18.0;
+    if let Some(on) = tick {
+        let box_rect = Rect::from_center_size(pos2(rect.left() + 18.0, rect.center().y), vec2(24.0, ROW_H));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(box_rect).layout(Layout::left_to_right(Align::Center)));
+        child.spacing_mut().interact_size = vec2(theme::size::CHECK, theme::size::CHECK);
+        child.spacing_mut().icon_width = theme::size::CHECK;
+        let mut ticked = on;
+        let check = child.add(egui::Checkbox::without_text(&mut ticked));
+        check.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, format!("Select {}", node.name)));
+        if check.clicked() {
+            hit = Hit::Pick;
+        }
+        glyph_x += 26.0;
     }
     if selected && scroll {
         ui.scroll_to_rect(rect, None);
@@ -371,14 +424,21 @@ fn row(ui: &mut Ui, node: &DestNode, query: &str, selected: bool, scroll: bool) 
     let glyph = match node.kind.as_str() {
         "account" | "workspace" => Glyph::Team,
         "project" => Glyph::Project,
+        "file" => Glyph::File,
         _ => Glyph::Folder,
     };
-    let icon = Rect::from_center_size(pos2(rect.left() + 18.0, rect.center().y), vec2(16.0, 16.0));
+    let icon = Rect::from_center_size(pos2(glyph_x, rect.center().y), vec2(16.0, 16.0));
     paint(painter, icon, glyph, theme::TEXT_3);
-    let chevron_x = rect.right() - 16.0;
-    painter.text(pos2(chevron_x, rect.center().y), egui::Align2::CENTER_CENTER, "›", theme::body(), theme::TEXT_4);
-
-    let mut right = chevron_x - 12.0;
+    let mut right = if file {
+        let galley = painter.layout_no_wrap(fmt_bytes(node.size), theme::detail(), theme::TEXT_3);
+        let pos = pos2(rect.right() - 12.0 - galley.size().x, rect.center().y - galley.size().y / 2.0);
+        painter.galley(pos, galley, theme::TEXT_3);
+        pos.x - 12.0
+    } else {
+        let chevron_x = rect.right() - 16.0;
+        painter.text(pos2(chevron_x, rect.center().y), egui::Align2::CENTER_CENTER, "›", theme::body(), theme::TEXT_4);
+        chevron_x - 12.0
+    };
     let left = icon.right() + 10.0;
     if !node.where_.is_empty() {
         let max = (right - left) * 0.45;
@@ -396,7 +456,7 @@ fn row(ui: &mut Ui, node: &DestNode, query: &str, selected: bool, scroll: bool) 
     };
     let galley = painter.layout_job(highlighted(&node.name, query, colour, (right - left).max(0.0), bold));
     painter.galley(pos2(left, rect.center().y - galley.size().y / 2.0), galley, colour);
-    response.clicked()
+    hit
 }
 
 /// The name with the query's first match in bold white (`<mark>`), on one line
@@ -496,7 +556,12 @@ fn foot(ui: &mut Ui, picker: &mut DestPicker, act: &mut Option<Do>) {
     let choose = match picker.mode {
         DestMode::Upload { .. } => CHOOSE_UPLOAD,
         DestMode::Watch => CHOOSE_PICK,
+        DestMode::Download => CHOOSE_DOWNLOAD,
     };
+    let picked = picker.picked_nodes().len();
+    let choose = if picker.mode == DestMode::Download && picked > 0 { format!("{choose} {picked}") } else { choose.to_string() };
+    // Nothing is put on Frame.io from here: no folder to make.
+    let makes_folders = picker.mode != DestMode::Download;
     let frame = egui::Frame::new()
         .inner_margin(Margin { left: 14, right: 14, top: 12, bottom: 12 })
         .show(ui, |ui| {
@@ -525,12 +590,14 @@ fn foot(ui: &mut Ui, picker: &mut DestPicker, act: &mut Option<Do>) {
                         }
                         new_folder |= field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     }
-                    new_folder |= subtle_button(ui, NEW_FOLDER, in_folder).clicked();
+                    if makes_folders {
+                        new_folder |= subtle_button(ui, NEW_FOLDER, in_folder).clicked();
+                    }
                     new_folder.then_some(Do::NewFolder)
                 },
                 |ui| {
                     // Right to left: the button that chooses is the outermost.
-                    if primary_button(ui, choose, in_folder).clicked() {
+                    if primary_button(ui, &choose, in_folder).clicked() {
                         return Some(Do::Choose);
                     }
                     subtle_button(ui, CANCEL, true).clicked().then_some(Do::Close)
@@ -621,6 +688,7 @@ enum Glyph {
     Team,
     Project,
     Folder,
+    File,
     Search,
     Close,
 }
@@ -630,6 +698,7 @@ fn paint(painter: &Painter, rect: Rect, glyph: Glyph, colour: Color32) {
         Glyph::Team => Icon::Team,
         Glyph::Project => Icon::Project,
         Glyph::Folder => Icon::Folder,
+        Glyph::File => Icon::File,
         Glyph::Search => Icon::Search,
         Glyph::Close => Icon::Close,
     };
@@ -798,6 +867,76 @@ mod tests {
         assert!(h.state().dest_picker.is_none());
     }
 
+    /// The download picker at a project: its folders, then its files.
+    fn download_at_project() -> UiState {
+        let mut state = at_project(DestMode::Download);
+        let p = state.dest_picker.as_mut().unwrap();
+        let mut items = vec![node("folder", "Ep 01"), node("folder", "Renders")];
+        for (name, size) in [("NF_101_cut_v4.mov", 48_200_000_000), ("NF_101_mix.wav", 612_000_000), ("notes.pdf", 1_400_000)] {
+            items.push(DestNode { size, ..node("file", name) });
+        }
+        p.items = Some(items);
+        state
+    }
+
+    #[test]
+    fn files_are_listed_and_ticked_rows_download_alone() {
+        let mut h = harness(download_at_project());
+        h.run_steps(4);
+        h.snapshot("dest_picker_download");
+        h.get_by_label(CHOOSE_DOWNLOAD);
+
+        // A file row ticks; a folder's box ticks it without opening it.
+        h.get_by_label("NF_101_mix.wav").click();
+        h.run();
+        h.get_by_label("Select Renders").click();
+        h.run();
+        let p = h.state().dest_picker.clone().unwrap();
+        assert_eq!(p.picked, vec!["file:NF_101_mix.wav".to_string(), "folder:Renders".to_string()]);
+        assert_eq!(p.stack.len(), 3, "ticking a folder doesn't open it");
+        assert!(h.state().requests.is_empty());
+
+        // Ticking again unticks.
+        h.get_by_label("NF_101_mix.wav").click();
+        h.run();
+        assert_eq!(h.state().dest_picker.as_ref().unwrap().picked, vec!["folder:Renders".to_string()]);
+        h.get_by_label("notes.pdf").click();
+        h.run();
+        h.get_by_label("Download 2").click();
+        h.run();
+        assert_eq!(h.state().requests, vec![Request::DestChoose]);
+
+        // The row itself still opens a folder.
+        let mut h = harness(download_at_project());
+        h.run_steps(4);
+        h.get_by_label("Ep 01").click();
+        h.run();
+        assert_eq!(h.state().requests, vec![Request::DestLoad { skip: true }]);
+        assert_eq!(h.state().dest_picker.as_ref().unwrap().top().unwrap().name, "Ep 01");
+    }
+
+    #[test]
+    fn download_asks_for_the_open_folder_and_offers_no_new_folder() {
+        let mut h = harness(at_project(DestMode::Download));
+        h.run_steps(4);
+        assert!(h.query_by_label(NEW_FOLDER).is_none(), "nothing is made on Frame.io from a download");
+        h.get_by_label(TITLE_DOWNLOAD);
+        h.get_by_label(CHOOSE_DOWNLOAD).click();
+        h.run();
+        assert_eq!(h.state().requests, vec![Request::DestChoose]);
+
+        // Above a project there is nothing to download yet.
+        let mut state = at_project(DestMode::Download);
+        let p = state.dest_picker.as_mut().unwrap();
+        p.stack.truncate(2);
+        p.items = Some(vec![node("project", "Nightfall")]);
+        let mut h = harness(state);
+        h.run_steps(4);
+        h.get_by_label(CHOOSE_DOWNLOAD).click();
+        h.run();
+        assert!(h.state().requests.is_empty(), "Download is off at a workspace");
+    }
+
     #[test]
     fn nothing_can_be_chosen_above_a_project() {
         let mut state = at_project(DestMode::Upload { pending: Vec::new() });
@@ -821,6 +960,8 @@ mod tests {
         assert_eq!(title(&p), "Upload 3 items to");
         p.mode = DestMode::Watch;
         assert_eq!(title(&p), TITLE_PICK);
+        p.mode = DestMode::Download;
+        assert_eq!(title(&p), TITLE_DOWNLOAD);
     }
 
     #[test]

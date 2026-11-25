@@ -83,6 +83,9 @@ impl Manager {
         }
         let opts: ShareOptions = serde_json::from_str(&t.options).unwrap_or_default();
         let watch = !opts.watch.is_empty() || (opts.paths.len() == 1 && t.source == opts.paths[0]);
+        // A download from the account shares the files it fetched, as a watch
+        // batch does: they are already in the account.
+        let watch = watch || super::manager::is_account_download(&t);
         if t.kind == "download" && !watch {
             return Err("only files in your Frame.io account can be shared".to_string());
         }
@@ -101,6 +104,9 @@ impl Manager {
                 }
             }
             return Err("none of these files made it to Frame.io".to_string());
+        }
+        if assets.len() > MAX_SHARE_ASSETS && t.kind == "download" {
+            return Err(format!("a share holds up to {} items, this has {}", MAX_SHARE_ASSETS, assets.len()));
         }
         if assets.len() > MAX_SHARE_ASSETS {
             return Err(format!(

@@ -1685,7 +1685,7 @@ impl Watcher {
     }
 }
 
-fn list_error(e: &ApiErr) -> String {
+pub(crate) fn list_error(e: &ApiErr) -> String {
     match e {
         ApiErr::Status(ae) => match ae.status {
             404 => "Frame.io folder not found".to_string(),
@@ -1698,13 +1698,27 @@ fn list_error(e: &ApiErr) -> String {
 
 /// list_remote returns every file below a Frame.io folder with its path relative
 /// to it, using the same safe names as share downloads.
-async fn list_remote(cx: &CancellationToken, c: &Client, acct: &str, root: &str) -> Result<Vec<RemoteFile>, ApiErr> {
+pub(crate) async fn list_remote(cx: &CancellationToken, c: &Client, acct: &str, root: &str) -> Result<Vec<RemoteFile>, ApiErr> {
+    list_remote_only(cx, c, acct, root, None).await
+}
+
+/// list_remote_only is list_remote limited, when `only` is given, to those of
+/// the folder's own children (folders, files, version stacks by their IDs) and
+/// what is inside them; paths stay relative to `root`.
+pub(crate) async fn list_remote_only(
+    cx: &CancellationToken,
+    c: &Client,
+    acct: &str,
+    root: &str,
+    only: Option<&HashSet<String>>,
+) -> Result<Vec<RemoteFile>, ApiErr> {
     let mut out: Vec<RemoteFile> = Vec::new();
-    walk_remote(cx, c, acct, root, "", 0, &mut out).await?;
+    walk_remote(cx, c, acct, root, "", 0, only, &mut out).await?;
     dedupe_remote(&mut out);
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_remote<'a>(
     cx: &'a CancellationToken,
     c: &'a Client,
@@ -1712,6 +1726,7 @@ fn walk_remote<'a>(
     id: &'a str,
     prefix: &'a str,
     depth: u32,
+    only: Option<&'a HashSet<String>>,
     out: &'a mut Vec<RemoteFile>,
 ) -> BoxFuture<'a, Result<(), ApiErr>> {
     async move {
@@ -1720,10 +1735,13 @@ fn walk_remote<'a>(
         }
         let kids = c.children(cx, acct, id).await?;
         for a in kids {
+            if only.is_some_and(|o| !o.contains(&a.id)) {
+                continue;
+            }
             match a.type_.as_str() {
                 "folder" => {
                     let next = join_path(prefix, &share::safe_name(&a.name));
-                    walk_remote(cx, c, acct, &a.id, &next, depth + 1, out).await?;
+                    walk_remote(cx, c, acct, &a.id, &next, depth + 1, None, out).await?;
                 }
                 "file" | "version_stack" => {
                     let f = if a.type_ == "version_stack" {
